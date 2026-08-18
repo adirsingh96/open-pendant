@@ -1,137 +1,581 @@
-/*
- * Copyright (c) 2021 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
+#include <errno.h>
+#include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/audio/dmic.h>
-
-#include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(dmic_sample);
+#include <zephyr/sys/printk.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/hci.h>
 
 #define MAX_SAMPLE_RATE  16000
-#define SAMPLE_BIT_WIDTH CONFIG_SAMPLE_BIT_WIDTH
-#define PDM_CTL_IDX      CONFIG_HW_CHANNEL_INDEX
-#define BYTES_PER_SAMPLE SAMPLE_BIT_WIDTH / 8
-/* Milliseconds to wait for a block to be read. */
-#define READ_TIMEOUT     1000
+#define SAMPLE_BIT_WIDTH 16
+#define BLOCK_SIZE       1024
 
-/* Size of a block for 100 ms of audio data. */
-#define BLOCK_SIZE(_sample_rate, _number_of_channels) \
-	(BYTES_PER_SAMPLE * (_sample_rate / 10) * _number_of_channels)
+#define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
+#define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
-/* Driver will allocate blocks from this slab to receive audio data into them.
- * Application, after getting a given block from the driver and processing its
- * data, needs to free that block.
+/* Custom GATT UUIDs (also listed in project_context.md) */
+#define PENDANT_SVC_UUID_VAL \
+	BT_UUID_128_ENCODE(0x70301101, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
+#define PENDANT_PCM_UUID_VAL \
+	BT_UUID_128_ENCODE(0x70301102, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
+#define PENDANT_STATUS_UUID_VAL \
+	BT_UUID_128_ENCODE(0x70301103, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
+
+#define PCM_HDR_SIZE 4
+
+K_MEM_SLAB_DEFINE_STATIC(rx_mem_slab, BLOCK_SIZE, 4, 4);
+
+const struct device *mic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
+const struct device *imu_dev = DEVICE_DT_GET(DT_NODELABEL(lsm6ds3tr_c));
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+
+static const struct bt_uuid_128 pendant_svc_uuid = BT_UUID_INIT_128(PENDANT_SVC_UUID_VAL);
+static const struct bt_uuid_128 pendant_pcm_uuid = BT_UUID_INIT_128(PENDANT_PCM_UUID_VAL);
+static const struct bt_uuid_128 pendant_status_uuid = BT_UUID_INIT_128(PENDANT_STATUS_UUID_VAL);
+
+/* Name in the primary packet so macOS CoreBluetooth sees it (31-byte ADV
+ * cannot hold both a complete name and a 128-bit UUID). UUID is in the
+ * scan response.
  */
-#define MAX_BLOCK_SIZE   BLOCK_SIZE(MAX_SAMPLE_RATE, 2)
-#define BLOCK_COUNT      4
-K_MEM_SLAB_DEFINE_STATIC(mem_slab, MAX_BLOCK_SIZE, BLOCK_COUNT, 4);
+static const struct bt_data ad[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+};
 
-static int do_pdm_transfer(const struct device *dmic_dev,
-			   struct dmic_cfg *cfg,
-			   size_t block_count)
+static const struct bt_data sd[] = {
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, PENDANT_SVC_UUID_VAL),
+};
+
+static volatile bool ble_ok;
+static volatile bool pcm_notify_enabled;
+static volatile bool imu_sleep;
+static volatile bool status_notify_enabled;
+static uint8_t status_buf[4];
+static void status_notify(int volume);
+static struct bt_conn *current_conn;
+static uint16_t pcm_seq;
+static bool mic_running;
+
+#define IMU_HIST 16
+#define IMU_STILL_STD_MM 80   /* mm/s^2; table noise is small, walk is hundreds */
+#define IMU_STILL_HITS 10     /* consecutive still polls before sleep (~10 s) */
+
+static int32_t imu_hist[IMU_HIST];
+static uint8_t imu_hist_n;
+static uint8_t imu_hist_i;
+static uint8_t imu_still_hits;
+static bool imu_fetch_ok;
+
+static void mic_set_run(bool on)
 {
-	int ret;
+	if (on == mic_running) {
+		return;
+	}
+	if (dmic_trigger(mic_dev, on ? DMIC_TRIGGER_START : DMIC_TRIGGER_STOP) == 0) {
+		mic_running = on;
+		printk("PDM mic %s\n", on ? "START" : "STOP");
+	}
+}
 
-	LOG_INF("PCM output rate: %u, channels: %u",
-		cfg->streams[0].pcm_rate, cfg->channel.req_num_chan);
+static int32_t imu_mag_mm(void)
+{
+	struct sensor_value x, y, z;
+	int32_t ax, ay, az;
 
-	ret = dmic_configure(dmic_dev, cfg);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure the driver: %d", ret);
-		return ret;
+	if (!device_is_ready(imu_dev)) {
+		imu_fetch_ok = false;
+		return -1;
+	}
+	if (sensor_sample_fetch_chan(imu_dev, SENSOR_CHAN_ACCEL_XYZ) < 0) {
+		imu_fetch_ok = false;
+		return -1;
+	}
+	if (sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_X, &x) < 0 ||
+	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Y, &y) < 0 ||
+	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_Z, &z) < 0) {
+		imu_fetch_ok = false;
+		return -1;
+	}
+	imu_fetch_ok = true;
+	ax = sensor_value_to_milli(&x);
+	ay = sensor_value_to_milli(&y);
+	az = sensor_value_to_milli(&z);
+	if (ax < 0) {
+		ax = -ax;
+	}
+	if (ay < 0) {
+		ay = -ay;
+	}
+	if (az < 0) {
+		az = -az;
+	}
+	return ax + ay + az;
+}
+
+static int32_t imu_var_mm(void)
+{
+	int64_t sum = 0, var = 0;
+	int n = imu_hist_n;
+	int32_t mean;
+	int i;
+
+	if (n < 4) {
+		return 1000000;
+	}
+	for (i = 0; i < n; i++) {
+		sum += imu_hist[i];
+	}
+	mean = (int32_t)(sum / n);
+	for (i = 0; i < n; i++) {
+		int32_t d = imu_hist[i] - mean;
+
+		var += (int64_t)d * d;
+	}
+	return (int32_t)(var / n);
+}
+
+static void imu_poll(int volume)
+{
+	int32_t mag = imu_mag_mm();
+	int32_t var;
+	bool still;
+
+	if (mag < 0) {
+		return;
+	}
+	imu_hist[imu_hist_i] = mag;
+	imu_hist_i = (imu_hist_i + 1) % IMU_HIST;
+	if (imu_hist_n < IMU_HIST) {
+		imu_hist_n++;
+	}
+	var = imu_var_mm();
+	still = (var < (IMU_STILL_STD_MM * IMU_STILL_STD_MM));
+
+	if (!still) {
+		imu_still_hits = 0;
+		if (imu_sleep) {
+			imu_sleep = false;
+			mic_set_run(true);
+			printk("IMU wake (var=%d)\n", var);
+			status_notify(volume);
+		}
+		return;
 	}
 
-	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
-	if (ret < 0) {
-		LOG_ERR("START trigger failed: %d", ret);
-		return ret;
+	if (imu_still_hits < 255) {
+		imu_still_hits++;
+	}
+	if (!imu_sleep && imu_still_hits >= IMU_STILL_HITS) {
+		imu_sleep = true;
+		mic_set_run(false);
+		printk("IMU sleep (still var=%d)\n", var);
+		status_notify(0);
+	}
+}
+
+static void status_fill(int volume)
+{
+	int v = volume;
+
+	if (v < 0) {
+		v = 0;
+	}
+	if (v > 65535) {
+		v = 65535;
+	}
+	status_buf[0] = (imu_sleep ? 1 : 0) | (mic_running ? 2 : 0) |
+			(device_is_ready(imu_dev) ? 4 : 0) |
+			(imu_fetch_ok ? 8 : 0);
+	sys_put_le16((uint16_t)v, &status_buf[1]);
+	status_buf[3] = imu_still_hits;
+}
+
+static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			   void *buf, uint16_t len, uint16_t offset)
+{
+	status_fill(0);
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, status_buf,
+				 sizeof(status_buf));
+}
+
+static void status_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	status_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+	printk("Status notify %s\n", status_notify_enabled ? "ON" : "OFF");
+	status_notify(0);
+}
+
+static void pcm_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	pcm_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+	printk("PCM notify %s\n", pcm_notify_enabled ? "ON" : "OFF");
+	if (gpio_is_ready_dt(&led)) {
+		gpio_pin_set_dt(&led, pcm_notify_enabled ? 1 : 0);
+	}
+}
+
+BT_GATT_SERVICE_DEFINE(pendant_svc,
+	BT_GATT_PRIMARY_SERVICE(&pendant_svc_uuid),
+	BT_GATT_CHARACTERISTIC(&pendant_pcm_uuid.uuid,
+			       BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_NONE,
+			       NULL, NULL, NULL),
+	BT_GATT_CCC(pcm_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CHARACTERISTIC(&pendant_status_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ,
+			       status_read, NULL, NULL),
+	BT_GATT_CCC(status_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
+static void status_notify(int volume)
+{
+	status_fill(volume);
+	if (!status_notify_enabled || current_conn == NULL) {
+		return;
+	}
+	bt_gatt_notify(current_conn, &pendant_svc.attrs[5], status_buf,
+		       sizeof(status_buf));
+}
+
+static void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	printk("ATT MTU updated: TX %u RX %u\n", tx, rx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+	.att_mtu_updated = mtu_updated,
+};
+
+static int pcm_notify_chunk(const uint8_t *pcm, size_t pcm_len)
+{
+	uint8_t pkt[244];
+	uint16_t mtu;
+	uint16_t payload_max;
+	uint8_t frag_count;
+	uint8_t frag;
+	size_t offset = 0;
+	int err = 0;
+
+	if (!pcm_notify_enabled || current_conn == NULL || imu_sleep) {
+		return 0;
 	}
 
-	for (int i = 0; i < block_count; ++i) {
-		void *buffer;
-		uint32_t size;
+	mtu = bt_gatt_get_mtu(current_conn);
+	if (mtu < (3 + PCM_HDR_SIZE + 1)) {
+		return -EINVAL;
+	}
 
-		ret = dmic_read(dmic_dev, 0, &buffer, &size, READ_TIMEOUT);
-		if (ret < 0) {
-			LOG_ERR("%d - read failed: %d", i, ret);
-			return ret;
+	payload_max = mtu - 3 - PCM_HDR_SIZE;
+	if (payload_max > sizeof(pkt) - PCM_HDR_SIZE) {
+		payload_max = sizeof(pkt) - PCM_HDR_SIZE;
+	}
+
+	frag_count = (uint8_t)((pcm_len + payload_max - 1) / payload_max);
+
+	for (frag = 0; frag < frag_count; frag++) {
+		size_t n = pcm_len - offset;
+
+		if (n > payload_max) {
+			n = payload_max;
 		}
 
-		LOG_INF("%d - got buffer %p of %u bytes", i, buffer, size);
+		sys_put_le16(pcm_seq, &pkt[0]);
+		pkt[2] = frag;
+		pkt[3] = frag_count;
+		memcpy(&pkt[PCM_HDR_SIZE], pcm + offset, n);
 
-		k_mem_slab_free(&mem_slab, buffer);
+		err = bt_gatt_notify(current_conn, &pendant_svc.attrs[2], pkt,
+				     PCM_HDR_SIZE + n);
+		if (err) {
+			return err;
+		}
+
+		offset += n;
 	}
 
-	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
-	if (ret < 0) {
-		LOG_ERR("STOP trigger failed: %d", ret);
-		return ret;
+	pcm_seq++;
+	return 0;
+}
+
+static void adv_restart_fn(struct k_work *work);
+
+static K_WORK_DELAYABLE_DEFINE(adv_restart_work, adv_restart_fn);
+static uint8_t adv_restart_tries;
+
+static void adv_restart_fn(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+			      sd, ARRAY_SIZE(sd));
+	if (err == 0 || err == -EALREADY) {
+		adv_restart_tries = 0;
+		printk("Advertising restarted as \"%s\"\n", DEVICE_NAME);
+		return;
+	}
+	if (adv_restart_tries < 8) {
+		adv_restart_tries++;
+		printk("Advertising restart err %d, retry %u\n", err,
+		       adv_restart_tries);
+		k_work_schedule(&adv_restart_work, K_MSEC(250));
+	} else {
+		printk("Advertising failed to restart (err %d)\n", err);
+	}
+}
+
+static void schedule_adv_restart(void)
+{
+	adv_restart_tries = 0;
+	k_work_schedule(&adv_restart_work, K_MSEC(50));
+}
+
+static void connected(struct bt_conn *conn, uint8_t err)
+{
+	struct bt_le_conn_param conn_param = {
+		.interval_min = 6,
+		.interval_max = 12,
+		.latency = 0,
+		.timeout = 200, /* 2 s: recover if the host app vanishes */
+	};
+
+	if (err) {
+		printk("BLE connection failed (err 0x%02x)\n", err);
+		schedule_adv_restart();
+		return;
 	}
 
-	return ret;
+	k_work_cancel_delayable(&adv_restart_work);
+
+	if (current_conn) {
+		bt_conn_unref(current_conn);
+	}
+	current_conn = bt_conn_ref(conn);
+	printk("BLE connected\n");
+
+	bt_conn_le_param_update(conn, &conn_param);
+}
+
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+
+	printk("BLE disconnected (reason 0x%02x)\n", reason);
+	pcm_notify_enabled = false;
+	status_notify_enabled = false;
+
+	if (gpio_is_ready_dt(&led)) {
+		gpio_pin_set_dt(&led, 0);
+	}
+
+	if (current_conn) {
+		bt_conn_unref(current_conn);
+		current_conn = NULL;
+	}
+
+	/* Controller may still be tearing the link down; retry from a work item. */
+	schedule_adv_restart();
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = connected,
+	.disconnected = disconnected,
+};
+
+static int ble_start(void)
+{
+	int err;
+
+	bt_gatt_cb_register(&gatt_callbacks);
+
+	printk("Starting Bluetooth...\n");
+
+	err = bt_enable(NULL);
+	if (err) {
+		printk("Bluetooth init failed (err %d)\n", err);
+		return err;
+	}
+
+	printk("Bluetooth initialized\n");
+
+	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+			      sd, ARRAY_SIZE(sd));
+	if (err) {
+		printk("Advertising failed to start (err %d)\n", err);
+		return err;
+	}
+
+	ble_ok = true;
+	printk("Advertising as \"%s\"\n", DEVICE_NAME);
+	return 0;
+}
+
+static void ble_thread(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	ble_start();
+}
+
+K_THREAD_STACK_DEFINE(ble_stack, 4096);
+static struct k_thread ble_thread_data;
+
+static int imu_bringup(void)
+{
+	int err;
+	int tries;
+
+	if (device_is_ready(imu_dev)) {
+		return 0;
+	}
+
+	for (tries = 0; tries < 4; tries++) {
+		k_msleep(20);
+		err = device_init(imu_dev);
+		printk("IMU init try %d: err=%d ready=%d\n", tries + 1, err,
+		       (int)device_is_ready(imu_dev));
+		if (device_is_ready(imu_dev)) {
+			return 0;
+		}
+	}
+	return err;
 }
 
 int main(void)
 {
-	const struct device *const dmic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
-	int ret;
+	void *buffer;
+	size_t size;
+	unsigned int chunk = 0;
+	unsigned int sent = 0;
+	unsigned int dropped = 0;
+	bool led_on = false;
 
-	LOG_INF("DMIC sample");
+	if (gpio_is_ready_dt(&led)) {
+		gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	}
 
-	if (!device_is_ready(dmic_dev)) {
-		LOG_ERR("%s is not ready", dmic_dev->name);
+	printk("Booting AI Pendant (GATT PCM stream)...\n");
+
+	k_thread_create(&ble_thread_data, ble_stack,
+			K_THREAD_STACK_SIZEOF(ble_stack), ble_thread,
+			NULL, NULL, NULL, 5, 0, K_NO_WAIT);
+
+	for (int i = 0; i < 50 && !ble_ok; i++) {
+		k_sleep(K_MSEC(100));
+	}
+
+	if (!device_is_ready(mic_dev)) {
+		printk("ERROR: PDM Microphone is not ready in Devicetree.\n");
 		return 0;
 	}
 
 	struct pcm_stream_cfg stream = {
+		.pcm_rate = MAX_SAMPLE_RATE,
 		.pcm_width = SAMPLE_BIT_WIDTH,
-		.mem_slab  = &mem_slab,
+		.block_size = BLOCK_SIZE,
+		.mem_slab  = &rx_mem_slab,
 	};
+
 	struct dmic_cfg cfg = {
 		.io = {
-			/* These fields can be used to limit the PDM clock
-			 * configurations that the driver is allowed to use
-			 * to those supported by the microphone.
-			 */
 			.min_pdm_clk_freq = 1000000,
-			.max_pdm_clk_freq = 3500000,
+			.max_pdm_clk_freq = 3200000,
 			.min_pdm_clk_dc   = 40,
 			.max_pdm_clk_dc   = 60,
 		},
 		.streams = &stream,
 		.channel = {
 			.req_num_streams = 1,
+			.req_num_chan    = 1,
+			.req_chan_map_lo = dmic_build_channel_map(0, 0, PDM_CHAN_LEFT),
 		},
 	};
 
-	cfg.channel.req_num_chan = 1;
-	cfg.channel.req_chan_map_lo =
-		dmic_build_channel_map(0, PDM_CTL_IDX, PDM_CHAN_LEFT);
-	cfg.streams[0].pcm_rate = MAX_SAMPLE_RATE;
-	cfg.streams[0].block_size =
-		BLOCK_SIZE(cfg.streams[0].pcm_rate, cfg.channel.req_num_chan);
-
-	ret = do_pdm_transfer(dmic_dev, &cfg, 2 * BLOCK_COUNT);
-	if (ret < 0) {
+	if (dmic_configure(mic_dev, &cfg) < 0) {
+		printk("ERROR: Failed to configure DMIC\n");
 		return 0;
 	}
 
-	cfg.channel.req_num_chan = 2;
-	cfg.channel.req_chan_map_lo =
-		dmic_build_channel_map(0, PDM_CTL_IDX, PDM_CHAN_LEFT) |
-		dmic_build_channel_map(1, PDM_CTL_IDX, PDM_CHAN_RIGHT);
-	cfg.streams[0].pcm_rate = MAX_SAMPLE_RATE;
-	cfg.streams[0].block_size =
-		BLOCK_SIZE(cfg.streams[0].pcm_rate, cfg.channel.req_num_chan);
-
-	ret = do_pdm_transfer(dmic_dev, &cfg, 2 * BLOCK_COUNT);
-	if (ret < 0) {
-		return 0;
+	if (imu_bringup() == 0) {
+		printk("IMU ready (sleep when still, wake on motion).\n");
+	} else {
+		printk("IMU not ready — sleep stays host-side only.\n");
 	}
 
-	LOG_INF("Exiting");
+	if (dmic_trigger(mic_dev, DMIC_TRIGGER_START) < 0) {
+		printk("ERROR: Failed to start DMIC\n");
+		return 0;
+	}
+	mic_running = true;
+
+	printk("Microphone is active. Subscribe to PCM notify to record.\n");
+
+	while (1) {
+		if (imu_sleep) {
+			imu_poll(0);
+			status_notify(0);
+			led_on = !led_on;
+			if (gpio_is_ready_dt(&led)) {
+				gpio_pin_set_dt(&led, led_on);
+			}
+			k_sleep(K_MSEC(200));
+			continue;
+		}
+
+		if (dmic_read(mic_dev, 0, &buffer, &size, 2000) != 0) {
+			printk("PDM read timeout — restarting mic\n");
+			dmic_trigger(mic_dev, DMIC_TRIGGER_STOP);
+			k_msleep(20);
+			dmic_trigger(mic_dev, DMIC_TRIGGER_START);
+			mic_running = true;
+			continue;
+		}
+
+		if (pcm_notify_chunk(buffer, size) == 0) {
+			if (pcm_notify_enabled) {
+				sent++;
+			}
+		} else {
+			dropped++;
+		}
+
+		chunk++;
+		if ((chunk % 32) == 0) {
+			int16_t *pcm_data = (int16_t *)buffer;
+			int samples = size / 2;
+			int32_t sum = 0;
+			int volume;
+			int i;
+
+			for (i = 0; i < samples; i++) {
+				sum += (pcm_data[i] > 0 ? pcm_data[i] : -pcm_data[i]);
+			}
+			volume = samples ? (sum / samples) : 0;
+			imu_poll(volume);
+			status_notify(volume);
+
+			led_on = !led_on;
+			if (gpio_is_ready_dt(&led)) {
+				gpio_pin_set_dt(&led, pcm_notify_enabled ? 1 : led_on);
+			}
+
+			printk("Vol: %4d | notify=%d imu_sleep=%d imu_ok=%d still=%u sent=%u drop=%u seq=%u\n",
+			       volume, pcm_notify_enabled, imu_sleep, imu_fetch_ok,
+			       imu_still_hits, sent, dropped, pcm_seq);
+		}
+
+		k_mem_slab_free(&rx_mem_slab, buffer);
+	}
+
 	return 0;
 }

@@ -1,12 +1,30 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Mic power on at boot. IMU regulator needs extra settle time; probe the
+ * LSM6DS3TR-C after boot (deferred-init in main).
  */
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
 / {
 	msm261d3526hicpm-c-en {
 		regulator-boot-on;
+	};
+
+	lsm6ds3tr-c-en {
+		regulator-always-on;
+		startup-delay-us = <20000>;
 	};
 };
 
 dmic_dev: &pdm0 {
 	status = "okay";
+};
+
+&i2c0 {
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+&lsm6ds3tr_c {
+	zephyr,deferred-init;
 };

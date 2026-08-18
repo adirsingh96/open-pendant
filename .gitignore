@@ -1,6 +1,63 @@
-# editors
+# editors / OS
 *.swp
 *~
+.DS_Store
+.idea/
+.vscode/
+*.iml
 
-# build
+# Zephyr / west / NCS
 /build*/
+*.hex
+*.elf
+*.map
+*.stat
+*.ninja
+.west/
+
+# local captures and personal audio (never publish)
+*.wav
+*.pcm
+capture.txt
+capture.json
+
+# secrets
+.env
+.env.*
+!.env.example
+**/openai_api_key
+*.pem
+*.p12
+google-services.json
+key.properties
+**/*.keystore
+**/*.jks
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Flutter (app/.gitignore also covers these)
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/.pub-cache/
+app/.pub/
+app/build/
+app/.idea/
+app/android/.gradle/
+app/android/local.properties
+app/android/.cxx/
+app/ios/Pods/
+app/ios/.symlinks/
+app/ios/Flutter/ephemeral/
+app/macos/Pods/
+app/macos/Flutter/ephemeral/
+.flutter-config/
+
+# Cursor / local tooling
+.cursor/
