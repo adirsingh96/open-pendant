@@ -3,7 +3,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <hal/nrf_power.h>
 #include <zephyr/audio/dmic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
@@ -57,7 +60,7 @@ static volatile bool ble_ok;
 static volatile bool pcm_notify_enabled;
 static volatile bool imu_sleep;
 static volatile bool status_notify_enabled;
-static uint8_t status_buf[4];
+static uint8_t status_buf[6];
 static void status_notify(int volume);
 static struct bt_conn *current_conn;
 static uint16_t pcm_seq;
@@ -180,6 +183,70 @@ static void imu_poll(int volume)
 	}
 }
 
+/* 1 MΩ / 510 kΩ divider on XIAO Sense. Gain 1/6, 0.6 V ref → 3.6 V at P0.31. */
+#define BAT_DIV_FULL_OHM 1510000
+#define BAT_DIV_OUT_OHM  510000
+
+static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
+static int16_t bat_raw;
+static uint16_t battery_mv;
+static bool battery_ok;
+
+static int battery_setup(void)
+{
+	int err;
+	struct adc_channel_cfg cfg = {
+		.gain = ADC_GAIN_1_6,
+		.reference = ADC_REF_INTERNAL,
+		.acquisition_time = ADC_ACQ_TIME_DEFAULT,
+		.channel_id = 7,
+		.differential = 0,
+		.input_positive = NRF_SAADC_AIN7,
+	};
+
+	if (!device_is_ready(adc_dev)) {
+		printk("ADC not ready — no battery SoC\n");
+		return -ENODEV;
+	}
+	err = adc_channel_setup(adc_dev, &cfg);
+	if (err) {
+		printk("ADC channel 7 setup failed (%d)\n", err);
+		return err;
+	}
+	battery_ok = true;
+	printk("Battery ADC ready (AIN7, P0.14 held low)\n");
+	return 0;
+}
+
+static uint16_t battery_sample_mv(void)
+{
+	int err;
+	int32_t pin_mv;
+	struct adc_sequence seq = {
+		.channels = BIT(7),
+		.buffer = &bat_raw,
+		.buffer_size = sizeof(bat_raw),
+		.resolution = 12,
+	};
+
+	if (!battery_ok) {
+		return 0;
+	}
+	err = adc_read(adc_dev, &seq);
+	if (err) {
+		return battery_mv;
+	}
+	pin_mv = bat_raw;
+	err = adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN_1_6, 12,
+				    &pin_mv);
+	if (err || pin_mv < 0) {
+		return battery_mv;
+	}
+	battery_mv = (uint16_t)((pin_mv * (uint64_t)BAT_DIV_FULL_OHM) /
+				BAT_DIV_OUT_OHM);
+	return battery_mv;
+}
+
 static void status_fill(int volume)
 {
 	int v = volume;
@@ -192,9 +259,11 @@ static void status_fill(int volume)
 	}
 	status_buf[0] = (imu_sleep ? 1 : 0) | (mic_running ? 2 : 0) |
 			(device_is_ready(imu_dev) ? 4 : 0) |
-			(imu_fetch_ok ? 8 : 0);
+			(imu_fetch_ok ? 8 : 0) |
+			(nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ? 16 : 0);
 	sys_put_le16((uint16_t)v, &status_buf[1]);
 	status_buf[3] = imu_still_hits;
+	sys_put_le16(battery_sample_mv(), &status_buf[4]);
 }
 
 static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -464,7 +533,11 @@ int main(void)
 		gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
 	}
 
-	printk("Booting AI Pendant (GATT PCM stream)...\n");
+	printk("Booting OpenPendant (GATT PCM stream)...\n");
+
+	if (battery_setup() == 0) {
+		printk("VBAT ~%u mV\n", battery_sample_mv());
+	}
 
 	k_thread_create(&ble_thread_data, ble_stack,
 			K_THREAD_STACK_SIZEOF(ble_stack), ble_thread,
@@ -569,8 +642,8 @@ int main(void)
 				gpio_pin_set_dt(&led, pcm_notify_enabled ? 1 : led_on);
 			}
 
-			printk("Vol: %4d | notify=%d imu_sleep=%d imu_ok=%d still=%u sent=%u drop=%u seq=%u\n",
-			       volume, pcm_notify_enabled, imu_sleep, imu_fetch_ok,
+			printk("Vol: %4d | bat=%umV notify=%d imu_sleep=%d imu_ok=%d still=%u sent=%u drop=%u seq=%u\n",
+			       volume, battery_mv, pcm_notify_enabled, imu_sleep, imu_fetch_ok,
 			       imu_still_hits, sent, dropped, pcm_seq);
 		}
 

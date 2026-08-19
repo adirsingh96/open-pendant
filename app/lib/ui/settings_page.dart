@@ -83,6 +83,11 @@ class _SettingsPageState extends State<SettingsPage> {
               onPressed: _saving ? null : _save,
               child: Text(_saving ? 'Saving…' : 'Save'),
             ),
+            const SizedBox(height: 24),
+            const Text(
+              'Named voices are on the home screen (Voices). '
+              'Samples stay on this computer and are sent with each diarized transcription.',
+            ),
           ],
         ),
       ),

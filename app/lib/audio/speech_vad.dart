@@ -43,13 +43,15 @@ class SpeechExtract {
   }
 }
 
-/// Energy VAD on 16-bit LE mono PCM. Speech if frame RMS >= [rmsThreshold].
+/// Local speech gate (no cloud): speech-band energy + spectral centroid.
+/// Closer to a Librosa-style check than RMS. Hiss/rumble usually fail;
+/// voiced speech (formants ~0.3–3.4 kHz, centroid ~0.2–2.8 kHz) passes.
 SpeechExtract extractSpeech(
   List<int> pcm, {
   int sampleRate = 16000,
-  double rmsThreshold = 450,
   double padS = 0.25,
   double minSpeechS = 0.25,
+  double? energyFloor,
 }) {
   final samples = pcm.length ~/ 2;
   final durationS = samples / sampleRate;
@@ -63,24 +65,12 @@ SpeechExtract extractSpeech(
   }
 
   const frame = 512;
+  final floor = energyFloor ?? VadGate.energyFloor;
   final speech = List<bool>.filled((samples + frame - 1) ~/ frame, false);
   for (var f = 0; f < speech.length; f++) {
     final start = f * frame;
     final end = (start + frame) > samples ? samples : start + frame;
-    var acc = 0.0;
-    var n = 0;
-    for (var i = start; i < end; i++) {
-      final lo = pcm[i * 2];
-      final hi = pcm[i * 2 + 1];
-      var s = lo | (hi << 8);
-      if (s >= 32768) {
-        s -= 65536;
-      }
-      acc += s * s;
-      n++;
-    }
-    final rms = n == 0 ? 0.0 : math.sqrt(acc / n);
-    speech[f] = rms >= rmsThreshold;
+    speech[f] = _frameIsVoice(pcm, start, end - start, sampleRate, floor);
   }
 
   final padFrames = (padS * sampleRate / frame).ceil();
@@ -149,6 +139,22 @@ SpeechExtract extractSpeech(
   );
 }
 
+/// True if this PCM snippet looks like human speech (for live quiet/rotate).
+bool pcmHasVoice(List<int> pcm, {int sampleRate = 16000, double? energyFloor}) {
+  final n = pcm.length ~/ 2;
+  if (n < 64) {
+    return false;
+  }
+  final start = n > 512 ? n - 512 : 0;
+  return _frameIsVoice(
+    pcm,
+    start,
+    n - start,
+    sampleRate,
+    energyFloor ?? VadGate.energyFloor,
+  );
+}
+
 double pcmRms(List<int> pcm) {
   final n = pcm.length ~/ 2;
   if (n == 0) {
@@ -156,13 +162,178 @@ double pcmRms(List<int> pcm) {
   }
   var acc = 0.0;
   for (var i = 0; i < n; i++) {
-    final lo = pcm[i * 2];
-    final hi = pcm[i * 2 + 1];
-    var s = lo | (hi << 8);
-    if (s >= 32768) {
-      s -= 65536;
-    }
-    acc += s * s;
+    acc += math.pow(_sample(pcm, i), 2);
   }
   return math.sqrt(acc / n);
+}
+
+int _sample(List<int> pcm, int i) {
+  final lo = pcm[i * 2];
+  final hi = pcm[i * 2 + 1];
+  var s = lo | (hi << 8);
+  if (s >= 32768) {
+    s -= 65536;
+  }
+  return s;
+}
+
+bool _frameIsVoice(
+  List<int> pcm,
+  int startSample,
+  int nSamples,
+  int sampleRate,
+  double energyFloor,
+) {
+  final spec = analyzeFrame(pcm, startSample, nSamples, sampleRate);
+  if (spec == null || spec.totalPow < energyFloor) {
+    return false;
+  }
+  return spec.ratio >= 0.45 && spec.centroidHz >= 200 && spec.centroidHz <= 2800;
+}
+
+class FrameSpectrum {
+  FrameSpectrum({
+    required this.totalPow,
+    required this.speechPow,
+    required this.ratio,
+    required this.centroidHz,
+  });
+
+  final double totalPow;
+  final double speechPow;
+  final double ratio;
+  final double centroidHz;
+}
+
+/// In-memory VAD loudness floor. Loaded/saved by [VadCal].
+class VadGate {
+  static const defaultEnergyFloor = 1e10;
+  static double energyFloor = defaultEnergyFloor;
+  static DateTime? calibratedAt;
+
+  static double get minSpeechS => calibratedAt == null ? 1.5 : 1.0;
+}
+
+FrameSpectrum? analyzeFrame(
+  List<int> pcm,
+  int startSample,
+  int nSamples,
+  int sampleRate,
+) {
+  const nfft = 512;
+  if (nSamples <= 0) {
+    return null;
+  }
+  final re = List<double>.filled(nfft, 0);
+  final im = List<double>.filled(nfft, 0);
+  var prev = 0.0;
+  var hp = 0.0;
+  final take = nSamples < nfft ? nSamples : nfft;
+  for (var i = 0; i < take; i++) {
+    final x = _sample(pcm, startSample + i).toDouble();
+    hp = 0.97 * (hp + x - prev);
+    prev = x;
+    re[i] = hp;
+  }
+  _fft(re, im);
+
+  final binHz = sampleRate / nfft;
+  final lo = math.max(1, (300 / binHz).floor());
+  final hi = math.min(nfft ~/ 2 - 1, (3400 / binHz).ceil());
+  var speechPow = 0.0;
+  var totalPow = 0.0;
+  var centNum = 0.0;
+  for (var k = 1; k < nfft ~/ 2; k++) {
+    final p = re[k] * re[k] + im[k] * im[k];
+    totalPow += p;
+    centNum += p * k * binHz;
+    if (k >= lo && k <= hi) {
+      speechPow += p;
+    }
+  }
+  if (totalPow <= 0) {
+    return null;
+  }
+  return FrameSpectrum(
+    totalPow: totalPow,
+    speechPow: speechPow,
+    ratio: speechPow / totalPow,
+    centroidHz: centNum / totalPow,
+  );
+}
+
+/// Wear the pendant as you will all day, read the script, then call this.
+/// Floor is ~6 dB below the median speech-shaped frame so a bit of extra
+/// distance still counts.
+double suggestEnergyFloor(List<int> pcm, {int sampleRate = 16000}) {
+  const frame = 512;
+  final samples = pcm.length ~/ 2;
+  final vals = <double>[];
+  for (var start = 0; start + 64 <= samples; start += frame) {
+    final n = start + frame > samples ? samples - start : frame;
+    final spec = analyzeFrame(pcm, start, n, sampleRate);
+    if (spec == null) {
+      continue;
+    }
+    if (spec.ratio >= 0.4 && spec.centroidHz >= 200 && spec.centroidHz <= 2800) {
+      vals.add(spec.totalPow);
+    }
+  }
+  if (vals.length < 6) {
+    throw Exception(
+      'Not enough clear speech in the sample. Wear the pendant as usual and read the whole script.',
+    );
+  }
+  vals.sort();
+  final median = vals[vals.length ~/ 2];
+  final floor = median * 0.25;
+  if (floor < 1e7) {
+    return 1e7;
+  }
+  if (floor > 5e11) {
+    return 5e11;
+  }
+  return floor;
+}
+
+void _fft(List<double> re, List<double> im) {
+  final n = re.length;
+  for (var i = 1, j = 0; i < n; i++) {
+    var bit = n >> 1;
+    for (; j >= bit; bit >>= 1) {
+      j -= bit;
+    }
+    j += bit;
+    if (i < j) {
+      final tr = re[i];
+      re[i] = re[j];
+      re[j] = tr;
+      final ti = im[i];
+      im[i] = im[j];
+      im[j] = ti;
+    }
+  }
+  for (var len = 2; len <= n; len <<= 1) {
+    final ang = -2 * math.pi / len;
+    final wlenRe = math.cos(ang);
+    final wlenIm = math.sin(ang);
+    final half = len >> 1;
+    for (var i = 0; i < n; i += len) {
+      var wRe = 1.0;
+      var wIm = 0.0;
+      for (var j = 0; j < half; j++) {
+        final i0 = i + j;
+        final i1 = i0 + half;
+        final vRe = re[i1] * wRe - im[i1] * wIm;
+        final vIm = re[i1] * wIm + im[i1] * wRe;
+        re[i1] = re[i0] - vRe;
+        im[i1] = im[i0] - vIm;
+        re[i0] += vRe;
+        im[i0] += vIm;
+        final nwRe = wRe * wlenRe - wIm * wlenIm;
+        wIm = wRe * wlenIm + wIm * wlenRe;
+        wRe = nwRe;
+      }
+    }
+  }
 }

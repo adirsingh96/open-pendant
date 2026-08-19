@@ -16,6 +16,8 @@ class PendantStatus {
     required this.imuFetchOk,
     required this.volume,
     required this.stillHits,
+    required this.batteryMv,
+    required this.usbPowered,
     required this.updatedAt,
   });
 
@@ -25,7 +27,50 @@ class PendantStatus {
   final bool imuFetchOk;
   final int volume;
   final int stillHits;
+  final int? batteryMv;
+  final bool usbPowered;
   final DateTime updatedAt;
+
+  /// Resting 1S LiPo estimate. Invalid on USB — the charger rail is ~4.1 V
+  /// even with no cell attached.
+  int? get batteryPct {
+    if (usbPowered) {
+      return null;
+    }
+    final mv = batteryMv;
+    if (mv == null || mv < 2800) {
+      return null;
+    }
+    const points = <List<int>>[
+      [4200, 100],
+      [4110, 90],
+      [4000, 80],
+      [3920, 70],
+      [3840, 60],
+      [3760, 50],
+      [3690, 40],
+      [3620, 30],
+      [3560, 20],
+      [3480, 10],
+      [3400, 5],
+      [3300, 0],
+    ];
+    if (mv >= points.first[0]) {
+      return 100;
+    }
+    if (mv <= points.last[0]) {
+      return 0;
+    }
+    for (var i = 0; i < points.length - 1; i++) {
+      final hi = points[i];
+      final lo = points[i + 1];
+      if (mv <= hi[0] && mv >= lo[0]) {
+        final t = (mv - lo[0]) / (hi[0] - lo[0]);
+        return (lo[1] + t * (hi[1] - lo[1])).round();
+      }
+    }
+    return 0;
+  }
 
   static PendantStatus? parse(List<int> data) {
     if (data.length < 4) {
@@ -33,6 +78,10 @@ class PendantStatus {
     }
     final flags = data[0];
     final volume = data[1] | (data[2] << 8);
+    int? batteryMv;
+    if (data.length >= 6) {
+      batteryMv = data[4] | (data[5] << 8);
+    }
     return PendantStatus(
       imuSleep: (flags & 1) != 0,
       micRunning: (flags & 2) != 0,
@@ -40,6 +89,8 @@ class PendantStatus {
       imuFetchOk: (flags & 8) != 0,
       volume: volume,
       stillHits: data[3],
+      batteryMv: batteryMv,
+      usbPowered: (flags & 16) != 0,
       updatedAt: DateTime.now(),
     );
   }
@@ -197,6 +248,8 @@ class PendantBle {
     final scanned = await scan(timeout: const Duration(seconds: 15));
     await connect(scanned);
   }
+
+  bool get isCapturing => _notifySub != null;
 
   Future<void> startRecording(void Function() onPacket) async {
     final c = _pcm;

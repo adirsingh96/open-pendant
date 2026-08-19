@@ -5,6 +5,7 @@
  * LSM6DS3TR-C after boot (deferred-init in main).
  */
 #include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
 
 / {
 	msm261d3526hicpm-c-en {
@@ -14,6 +15,31 @@
 	lsm6ds3tr-c-en {
 		regulator-always-on;
 		startup-delay-us = <20000>;
+	};
+};
+
+/* WLY602030 LiPo: VBAT — 1 MΩ — P0.31 — 510 kΩ — P0.14.
+ * P0.14 must stay LOW while a cell is attached or P0.31 can exceed 3.6 V.
+ */
+&gpio0 {
+	bat-meas-en {
+		gpio-hog;
+		gpios = <14 0>;
+		output-low;
+		line-name = "bat-meas-en";
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
 	};
 };
 

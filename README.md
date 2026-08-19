@@ -9,13 +9,13 @@ Record only with an obvious LED and an explicit host subscribe (GATT notify on =
 | Part | Notes |
 |------|--------|
 | Seeed XIAO nRF52840 Sense | nRF52840 + onboard PDM mic + LSM6DS3TR-C IMU |
-| Optional 1S LiPo | e.g. 3.7 V 300 mAh (WLY602030) |
+| WLY602030 1S LiPo | 3.7 V nominal, 300 mAh, 6 × 20 × 30 mm (32.5 mm with PCM). Open-wire leads to the XIAO **BAT+/BAT−** pads. USB-C charges via the onboard BQ25101. |
 | USB-C cable | Dev and UF2 flash |
 
 ## What you get
 
-- **Firmware** (Zephyr / nRF Connect SDK 3.4, Zephyr 4.4): BLE GATT PCM + status, IMU still-sleep (mic off when the board is still, wake on motion).
-- **Flutter app** in [`app/`](app/): scan/connect, record, VAD, OpenAI transcription, local SQLite clips.
+- **Firmware** (Zephyr / nRF Connect SDK 3.4, Zephyr 4.4): BLE GATT PCM + status, IMU still-sleep (mic off when the board is still, wake on motion), battery voltage / SoC estimate.
+- **Flutter app** in [`app/`](app/): arm once for all-day capture, local VAD (+ mic calibration), chunked OpenAI STT, optional speaker names, session transcripts, local SQLite.
 - **Laptop tools** in [`tools/`](tools/): BLE capture to WAV, OpenAI or local Whisper.
 
 Protocol, clip schema, and roadmap: [project_context.md](project_context.md). Later sync sketch: [docs/sync_api.md](docs/sync_api.md).
@@ -53,6 +53,13 @@ flutter run -d macos          # BLE works on Mac
 
 Paste `OPENAI_API_KEY` in **Settings**. It is stored on the host (Keychain / Keystore / app-support file on desktop), never on the pendant.
 
+**Typical day**
+
+1. Connect → optional **Calibrate** (wear as usual, read the script) so quiet neck-mic speech is not skipped.
+2. Optional **Voices**: enroll up to 4 people (2–10 s sample each) for named speaker labels.
+3. Tap **Record** once to arm. Notify stays on; LED stays solid. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local VAD skips the cloud when there is no speech.
+4. Tap **Stop** or **Sleep** to disarm. Home groups chunks into one session transcript; time-range filters and STT spend are on the home screen.
+
 More setup (permissions, IMU debug): [app/README.md](app/README.md).
 
 ## Laptop capture
@@ -72,12 +79,16 @@ python3 tools/transcribe.py capture.wav --backend local
 
 ## Consent and sleep
 
-- **Recording:** enable PCM notify. The red LED stays solid while subscribed.
-- **IMU sleep:** after ~10 s still, firmware stops the PDM mic and PCM. BLE stays up. Motion wakes the mic. Host VAD drops quiet audio before STT.
+- **Recording:** enable PCM notify. The red LED stays solid while subscribed (armed).
+- **IMU sleep:** after ~10 s still, firmware stops the PDM mic and PCM. BLE stays up. Motion wakes the mic. Host VAD drops non-speech before STT.
 - **App Sleep** is a BLE disconnect, not IMU sleep.
+
+## Battery
+
+Solder the WLY602030 **red** lead to **BAT+** and **black** to **BAT−** (polarity matters; open wire, no JST). USB-C charges the cell through the XIAO BQ25101.
+
+The cell has no fuel-gauge IC. Firmware measures pack voltage (P0.31, 1 MΩ / 510 kΩ divider) and the app maps that to a **rough SoC only when USB is unplugged**. On USB the BQ25101 rail reads ~4.1 V even with no cell, so the UI shows **USB** instead of a fake percent. Treat ~20% as “charge soon.” Keep P0.14 low whenever a cell is attached (firmware hog does this) so P0.31 stays within 3.6 V.
 
 ## License
 
 [Apache License 2.0](LICENSE).
-
-This project is a small XIAO Sense + documented BLE protocol. It is not a clone of larger stacks such as [Omi](https://github.com/BasedHardware/omi).

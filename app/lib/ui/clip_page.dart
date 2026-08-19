@@ -4,22 +4,85 @@ import 'package:intl/intl.dart';
 import '../db/models.dart';
 
 class ClipPage extends StatelessWidget {
-  const ClipPage({super.key, required this.clip});
+  const ClipPage({
+    super.key,
+    required this.clips,
+    this.sessionLabel,
+    this.rangeSegments,
+  });
 
-  final ClipRecord clip;
+  factory ClipPage.single({required ClipRecord clip}) {
+    return ClipPage(clips: [clip]);
+  }
+
+  factory ClipPage.session({required SessionGroup session}) {
+    return ClipPage(
+      clips: session.clips,
+      sessionLabel: 'Session · ${session.clips.length} chunks',
+    );
+  }
+
+  factory ClipPage.range({
+    required List<TranscriptSegment> segments,
+    required String title,
+  }) {
+    return ClipPage(
+      clips: const [],
+      sessionLabel: title,
+      rangeSegments: segments,
+    );
+  }
+
+  final List<ClipRecord> clips;
+  final String? sessionLabel;
+  final List<TranscriptSegment>? rangeSegments;
 
   @override
   Widget build(BuildContext context) {
     final clock = DateFormat.Hms();
+    final segs = rangeSegments ??
+        [
+          for (final c in clips) ...c.segments,
+        ];
+    final full = clips
+        .map((c) => c.fullText.trim())
+        .where((t) => t.isNotEmpty)
+        .join('\n\n');
+    final title = clips.isNotEmpty
+        ? DateFormat.yMMMd().add_Hms().format(clips.first.startedAt.toLocal())
+        : (sessionLabel ?? 'Transcript');
     return Scaffold(
-      appBar: AppBar(title: Text(DateFormat.yMMMd().add_Hms().format(clip.startedAt.toLocal()))),
+      appBar: AppBar(title: Text(title)),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text('${clip.durationS.toStringAsFixed(1)}s  ${clip.sttModel ?? ''}  ${clip.status}'),
+          if (clips.isNotEmpty) ...[
+            Text(
+              '${clips.length} chunk${clips.length == 1 ? '' : 's'}  '
+              '${sessionLabel ?? clips.first.sttModel ?? ''}  ${clips.first.status}',
+            ),
+            const SizedBox(height: 6),
+            Text(
+              SessionGroup(sessionId: 'view', clips: clips).usageLine,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            if (clips.length > 1) ...[
+              const SizedBox(height: 8),
+              for (final c in clips)
+                if (c.status == 'ok' || c.removedS > 0 || c.billedS > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '#${c.seq}  ${c.sttModel ?? c.status}  ${c.usageLine}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+            ],
+          ] else
+            Text('${segs.length} lines  ${sessionLabel ?? ''}'),
           const SizedBox(height: 12),
-          if (clip.segments.isEmpty) Text(clip.fullText),
-          for (final s in clip.segments)
+          if (segs.isEmpty) Text(full.isEmpty ? 'No speech in this range.' : full),
+          for (final s in segs)
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Row(
@@ -27,9 +90,19 @@ class ClipPage extends StatelessWidget {
                 children: [
                   SizedBox(
                     width: 88,
-                    child: Text(
-                      clock.format(s.spokenAt.toLocal()),
-                      style: Theme.of(context).textTheme.labelLarge,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          clock.format(s.spokenAt.toLocal()),
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        if ((s.speaker ?? '').trim().isNotEmpty)
+                          Text(
+                            s.speaker!.trim(),
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                      ],
                     ),
                   ),
                   Expanded(child: Text(s.text)),
