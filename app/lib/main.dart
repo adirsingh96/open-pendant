@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'macos/sandbox_migrate.dart';
 import 'ui/home_page.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await migrateMacosSandboxData();
   runApp(const OpenPendantApp());
 }
 

@@ -13,13 +13,14 @@ class ClipStore {
 
   Future<Database> _open() async {
     if (_db != null) {
+      await _ensureNotesTable(_db!);
       return _db!;
     }
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -49,6 +50,7 @@ CREATE TABLE clips (
         await _createSegmentTable(db);
         await _createDayRecapTable(db);
         await _createMemoryChatTable(db);
+        await _createNotesTable(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -118,8 +120,12 @@ CREATE TABLE clips (
             "ALTER TABLE clips ADD COLUMN alt_segments_json TEXT NOT NULL DEFAULT '[]'",
           );
         }
+        if (oldVersion < 9) {
+          await _createNotesTable(db);
+        }
       },
     );
+    await _ensureNotesTable(_db!);
     return _db!;
   }
 
@@ -389,6 +395,72 @@ CREATE TABLE memory_chats (
       error: r['error'] as String?,
       dayKeys: dayKeys,
     );
+  }
+
+  Future<void> _ensureNotesTable(DatabaseExecutor db) async {
+    await _createNotesTable(db);
+  }
+
+  Future<void> _createNotesTable(DatabaseExecutor db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS notes (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  text TEXT NOT NULL,
+  clip_id TEXT
+)''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at)',
+    );
+  }
+
+  Future<void> insertNote(SpokenNote note) async {
+    final db = await _open();
+    await db.insert('notes', {
+      'id': note.id,
+      'created_at': note.createdAt.toUtc().toIso8601String(),
+      'text': note.text,
+      'clip_id': note.clipId,
+    });
+  }
+
+  Future<void> deleteNote(String id) async {
+    final db = await _open();
+    await db.delete('notes', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<List<SpokenNote>> listNotesInRange({
+    required DateTime from,
+    required DateTime to,
+    String query = '',
+  }) async {
+    final db = await _open();
+    final start = from.toUtc().toIso8601String();
+    final end = to.toUtc().toIso8601String();
+    final q = query.trim();
+    final rows = q.isEmpty
+        ? await db.query(
+            'notes',
+            where: 'created_at >= ? AND created_at <= ?',
+            whereArgs: [start, end],
+            orderBy: 'created_at DESC',
+          )
+        : await db.query(
+            'notes',
+            where: 'created_at >= ? AND created_at <= ? AND text LIKE ?',
+            whereArgs: [start, end, '%$q%'],
+            orderBy: 'created_at DESC',
+          );
+    return [
+      for (final r in rows)
+        SpokenNote(
+          id: r['id'] as String,
+          createdAt: DateTime.tryParse(r['created_at'] as String? ?? '') ??
+              DateTime.fromMillisecondsSinceEpoch(0),
+          text: r['text'] as String? ?? '',
+          clipId: r['clip_id'] as String?,
+        ),
+    ];
   }
 
   Future<void> _createDayRecapTable(DatabaseExecutor db) async {

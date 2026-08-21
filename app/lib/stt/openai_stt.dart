@@ -25,7 +25,28 @@ class OpenAiStt {
     required String apiKey,
     required DateTime startedAt,
     SpeechExtract? speech,
+    bool fast = false,
   }) async {
+    if (fast) {
+      try {
+        return await _once(
+          wav: wav,
+          apiKey: apiKey,
+          startedAt: startedAt,
+          model: 'gpt-4o-mini-transcribe',
+          speech: speech,
+        );
+      } catch (e) {
+        debugPrint('STT fast gpt-4o-mini-transcribe failed: $e');
+        return await _once(
+          wav: wav,
+          apiKey: apiKey,
+          startedAt: startedAt,
+          model: 'gpt-transcribe',
+          speech: speech,
+        );
+      }
+    }
     final voices = await VoiceStore.list();
     if (voices.isNotEmpty) {
       try {

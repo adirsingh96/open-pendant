@@ -342,3 +342,17 @@ class SessionGroup {
   double get spendUsd =>
       clips.fold(0.0, (a, c) => a + c.spendUsd);
 }
+
+class SpokenNote {
+  SpokenNote({
+    required this.id,
+    required this.createdAt,
+    required this.text,
+    this.clipId,
+  });
+
+  final String id;
+  final DateTime createdAt;
+  final String text;
+  final String? clipId;
+}

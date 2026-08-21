@@ -32,5 +32,7 @@
 	<string>OpenPendant uses Bluetooth to receive audio from the necklace.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>OpenPendant uses Bluetooth to receive audio from the necklace.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>OpenPendant pastes a spoken Cursor command into the Composer box. It does not send the message.</string>
 </dict>
 </plist>

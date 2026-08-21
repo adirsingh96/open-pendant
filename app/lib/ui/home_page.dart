@@ -3,12 +3,15 @@ import 'dart:io';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
+import '../calendar/note_command.dart';
+import '../notes/note_prefs.dart';
 import '../audio/speech_vad.dart';
 import '../audio/wav_writer.dart';
 import '../ble/pendant_ble.dart';
@@ -16,11 +19,15 @@ import '../db/clip_store.dart';
 import '../db/day_recap.dart';
 import '../db/models.dart';
 import '../stt/api_key_store.dart';
+import '../stt/cursor_command.dart';
+import '../stt/cursor_prefs.dart';
+import '../macos/cursor_composer.dart';
 import '../stt/openai_refine.dart';
 import '../stt/openai_stt.dart';
 import '../stt/saaras_stt.dart';
 import '../stt/sarvam_key_store.dart';
 import '../stt/stt_prefs.dart';
+import '../stt/voice_store.dart';
 import 'clip_page.dart';
 import 'calibrate_page.dart';
 import 'day_recap_card.dart';
@@ -43,6 +50,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const _maxChunkBytes = 30 * 16000 * 2;
   static const _quietRotate = Duration(seconds: 8);
+  static const _cursorQuietRotate = Duration(milliseconds: 1500);
   static const _noPcmRotate = Duration(seconds: 2);
 
   AppLifecycleListener? _lifecycle;
@@ -54,6 +62,7 @@ class _HomePageState extends State<HomePage> {
   final _refine = OpenAiRefine();
   final _dev = DeveloperLive();
   final _search = TextEditingController();
+  final _noteDraft = TextEditingController();
 
   String _status = 'Disconnected. Force-quit nRF Connect first.';
   bool _busy = false;
@@ -74,10 +83,12 @@ class _HomePageState extends State<HomePage> {
   final _sttQueue = <ClipRecord>[];
   bool _sttBusy = false;
   List<SceneGroup> _scenes = [];
+  List<SpokenNote> _notes = [];
   List<TranscriptSegment> _rangeSegs = [];
   List<ClipRecord> _errorClips = [];
   DayRecap? _dayRecap;
   bool _cleaning = false;
+  bool _commandNext = false;
   List<DateTime> _speechDays = [];
   DateTime? _rangeFrom;
   DateTime? _rangeTo;
@@ -97,6 +108,8 @@ class _HomePageState extends State<HomePage> {
       }
     });
     SttPrefs.load();
+    CursorPrefs.load();
+    NotePrefs.load();
     final now = DateTime.now();
     _rangeFrom = DateTime(now.year, now.month, now.day);
     _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
@@ -117,6 +130,7 @@ class _HomePageState extends State<HomePage> {
     _armTick?.cancel();
     _lifecycle?.dispose();
     _search.dispose();
+    _noteDraft.dispose();
     _dev.dispose();
     _ble.disconnect();
     super.dispose();
@@ -167,6 +181,11 @@ class _HomePageState extends State<HomePage> {
         )
         .toList();
     final recap = await _store.getDayRecap(_dayKey(from));
+    final notes = await _store.listNotesInRange(
+      from: from,
+      to: to,
+      query: _search.text,
+    );
     final weekStart = DateTime(now.year, now.month, now.day)
         .subtract(const Duration(days: 6));
     final speechDays = await _store.listLocalDaysWithSpeech(
@@ -181,6 +200,7 @@ class _HomePageState extends State<HomePage> {
       _rangeSegs = allSegs;
       _errorClips = errors;
       _dayRecap = recap;
+      _notes = notes;
       _speechDays = speechDays;
       _totalCostUsd = cost;
       _totalBilledS = usage.billedS;
@@ -561,7 +581,7 @@ class _HomePageState extends State<HomePage> {
       _bytes = 0;
       await _ble.startRecording(_onPcm);
       _armTick?.cancel();
-      _armTick = Timer.periodic(const Duration(seconds: 1), (_) => _onArmTick());
+      _armTick = Timer.periodic(const Duration(milliseconds: 200), (_) => _onArmTick());
       setState(() => _armed = true);
       _refreshArmedStatus();
     } catch (e) {
@@ -593,8 +613,11 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final now = DateTime.now();
+    final quiet = (CursorPrefs.enabled || NotePrefs.enabled)
+        ? _cursorQuietRotate
+        : _quietRotate;
     if (_hadSpeechInChunk &&
-        now.difference(_lastSpeechAt ?? now) >= _quietRotate) {
+        now.difference(_lastSpeechAt ?? now) >= quiet) {
       Future.microtask(() => _rotateChunk());
       return;
     }
@@ -790,6 +813,7 @@ class _HomePageState extends State<HomePage> {
           apiKey: apiKey,
           startedAt: startedAt,
           speech: speech,
+          fast: CursorPrefs.enabled || NotePrefs.enabled,
         ),
         error: null,
       );
@@ -876,25 +900,32 @@ class _HomePageState extends State<HomePage> {
       TranscriptResult? saaras;
       Object? openaiErr;
       Object? saarasErr;
+      Future<void>? cursorKickoff;
       if (SttPrefs.useBoth) {
-        final pair = await Future.wait([
-          _tryOpenai(
-            wav: wav,
-            apiKey: openaiKey,
-            startedAt: clip.startedAt,
-            speech: speech,
-          ),
-          _trySaaras(
-            wav: wav,
-            apiKey: sarvamKey,
-            startedAt: clip.startedAt,
-            speech: speech,
-          ),
-        ]);
-        openai = pair[0].result;
-        openaiErr = pair[0].error;
-        saaras = pair[1].result;
-        saarasErr = pair[1].error;
+        final openaiF = _tryOpenai(
+          wav: wav,
+          apiKey: openaiKey,
+          startedAt: clip.startedAt,
+          speech: speech,
+        );
+        final saarasF = _trySaaras(
+          wav: wav,
+          apiKey: sarvamKey,
+          startedAt: clip.startedAt,
+          speech: speech,
+        );
+        final o = await openaiF;
+        openai = o.result;
+        openaiErr = o.error;
+        if (openai != null && _sttHasText(openai)) {
+          cursorKickoff = _maybeCursorCommand(
+            segs: _sttSegs(openai),
+            fullText: openai.text,
+          );
+        }
+        final s = await saarasF;
+        saaras = s.result;
+        saarasErr = s.error;
       } else if (SttPrefs.useSaarasOnly) {
         final one = await _trySaaras(
           wav: wav,
@@ -970,11 +1001,155 @@ class _HomePageState extends State<HomePage> {
           clearAlt: !SttPrefs.useBoth,
         ),
       );
+      if (cursorKickoff != null) {
+        await cursorKickoff;
+      } else {
+        await _maybeCursorCommand(
+          segs: _sttSegs(primary),
+          fullText: primary.text,
+        );
+      }
+      await _maybeSpokenNote(
+        segs: _sttSegs(primary),
+        fullText: primary.text,
+        clipId: clip.id,
+      );
     } catch (e) {
       await _store.upsertClip(clip.copyWith(status: 'error'));
       if (mounted && !_armed) {
         setState(() => _status = 'WAV saved; STT failed: $e');
       }
+    }
+  }
+
+  Future<void> _maybeCursorCommand({
+    required List<TranscriptSegment> segs,
+    required String fullText,
+  }) async {
+    if (!Platform.isMacOS) {
+      return;
+    }
+    await CursorPrefs.load();
+    if (!CursorPrefs.enabled) {
+      return;
+    }
+    final voices = await VoiceStore.list();
+    final wearer = voices.isEmpty ? null : voices.first.name;
+    final force = _commandNext;
+    final prompt = cursorPromptFromClip(
+      segs: segs,
+      fallback: fullText,
+      forceNext: force,
+      wearer: wearer,
+    );
+    if (force && mounted) {
+      setState(() => _commandNext = false);
+    }
+    if (prompt == null) {
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: prompt));
+    var pasted = false;
+    var pasteErr = '';
+    if (CursorPrefs.pasteIntoCursor) {
+      final r = await pasteIntoCursorComposer(
+        autoSend: CursorPrefs.autoSend,
+      );
+      pasted = r.ok;
+      pasteErr = r.detail;
+    }
+    if (!mounted) {
+      return;
+    }
+    final preview = prompt.length > 80 ? '${prompt.substring(0, 80)}…' : prompt;
+    final msg = pasted
+        ? (CursorPrefs.autoSend
+            ? 'Sent to Cursor: $preview'
+            : 'Copied to Cursor: $preview')
+        : 'Copied: $preview${pasteErr.isEmpty ? '. Click Composer, Cmd+V' : '. Paste failed: $pasteErr'}';
+    setState(() => _status = msg);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(duration: const Duration(seconds: 8), content: Text(msg)),
+    );
+  }
+
+  Future<void> _maybeSpokenNote({
+    required List<TranscriptSegment> segs,
+    required String fullText,
+    required String clipId,
+  }) async {
+    await NotePrefs.load();
+    if (!NotePrefs.enabled) {
+      return;
+    }
+    final voices = await VoiceStore.list();
+    final wearer = voices.isEmpty ? null : voices.first.name;
+    final note = calendarNoteFromClip(
+      segs: segs,
+      fallback: fullText,
+      wearer: wearer,
+    );
+    if (note == null) {
+      return;
+    }
+    try {
+      await _store.insertNote(
+        SpokenNote(
+          id: const Uuid().v4(),
+          createdAt: DateTime.now().toUtc(),
+          text: note,
+          clipId: clipId,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save note: $e')),
+      );
+      return;
+    }
+    await _reload();
+    if (!mounted) {
+      return;
+    }
+    final preview = note.length > 80 ? '${note.substring(0, 80)}…' : note;
+    final msg = 'Note saved: $preview';
+    setState(() => _status = msg);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(duration: const Duration(seconds: 6), content: Text(msg)),
+    );
+  }
+
+  Future<void> _addTypedNote() async {
+    final text = _noteDraft.text.trim();
+    if (text.isEmpty) {
+      return;
+    }
+    try {
+      await _store.insertNote(
+        SpokenNote(
+          id: const Uuid().v4(),
+          createdAt: DateTime.now().toUtc(),
+          text: text,
+        ),
+      );
+      _noteDraft.clear();
+      await _reload();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Note saved')),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save note: $e')),
+      );
     }
   }
 
@@ -1028,6 +1203,11 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+    await CursorPrefs.load();
+    await NotePrefs.load();
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _openDeveloper() async {
@@ -1356,6 +1536,12 @@ class _HomePageState extends State<HomePage> {
                             : _sleep,
                         child: const Text('Sleep'),
                       ),
+                      if (Platform.isMacOS && CursorPrefs.enabled)
+                        FilterChip(
+                          label: Text(_commandNext ? 'Command next' : 'Command'),
+                          selected: _commandNext,
+                          onSelected: (on) => setState(() => _commandNext = on),
+                        ),
                     ],
                   ),
                 ),
@@ -1410,6 +1596,60 @@ class _HomePageState extends State<HomePage> {
                   recap: _dayRecap,
                   stale: _recapStale,
                 ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
+                  child: Text(
+                    'Notes · ${DateFormat.MMMd().format(selected)}',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _noteDraft,
+                          decoration: const InputDecoration(
+                            hintText: 'Type a note, or say “take a note, …”',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => _addTypedNote(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _addTypedNote,
+                        child: const Text('Add'),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_notes.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: Text('No notes this day.'),
+                  )
+                else
+                  for (final n in _notes)
+                    Card(
+                      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: ListTile(
+                        title: Text(n.text),
+                        subtitle: Text(
+                          DateFormat.jm().format(n.createdAt.toLocal()),
+                        ),
+                        trailing: IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.close),
+                          onPressed: () async {
+                            await _store.deleteNote(n.id);
+                            await _reload();
+                          },
+                        ),
+                      ),
+                    ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                   child: Text(

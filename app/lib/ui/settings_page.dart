@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../macos/cursor_composer.dart';
 import '../mem0/mem0_store.dart';
+import '../notes/note_prefs.dart';
 import '../stt/api_key_store.dart';
+import '../stt/cursor_prefs.dart';
 import '../stt/sarvam_key_store.dart';
 import '../stt/stt_prefs.dart';
 
@@ -24,6 +28,10 @@ class _SettingsPageState extends State<SettingsPage> {
   final _sarvam = TextEditingController();
   final _mem0 = TextEditingController();
   String _stt = SttPrefs.openai;
+  bool _cursorOn = false;
+  bool _cursorPaste = true;
+  bool _cursorSend = true;
+  bool _notesOn = true;
   bool _loaded = false;
   bool _saving = false;
 
@@ -35,11 +43,17 @@ class _SettingsPageState extends State<SettingsPage> {
       SarvamKeyStore.read(),
       Mem0Store.readKey(),
       SttPrefs.load(),
+      CursorPrefs.load(),
+      NotePrefs.load(),
     ]).then((vals) {
       _key.text = vals[0] as String;
       _sarvam.text = vals[1] as String;
       _mem0.text = vals[2] as String;
       _stt = SttPrefs.provider;
+      _cursorOn = CursorPrefs.enabled;
+      _cursorPaste = CursorPrefs.pasteIntoCursor;
+      _cursorSend = CursorPrefs.autoSend;
+      _notesOn = NotePrefs.enabled;
       if (mounted) {
         setState(() => _loaded = true);
       }
@@ -58,6 +72,12 @@ class _SettingsPageState extends State<SettingsPage> {
     await ApiKeyStore.write(_key.text);
     await SarvamKeyStore.write(_sarvam.text);
     await SttPrefs.save(_stt);
+    await CursorPrefs.save(
+      on: _cursorOn,
+      paste: _cursorPaste,
+      send: _cursorSend,
+    );
+    await NotePrefs.save(on: _notesOn);
     await Mem0Store.writeKey(_mem0.text);
     await Mem0Store.userId();
   }
@@ -178,6 +198,103 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Text(_saving ? 'Saving…' : 'Save'),
           ),
           const SizedBox(height: 24),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Cursor commands (macOS)'),
+            subtitle: const Text(
+              'Say “Cursor, …” or tap Command on Home. Clips end ~1.5s after you stop talking (not 8s). Uses a faster STT model. Journal still saves.',
+            ),
+            value: _cursorOn,
+            onChanged: !_loaded
+                ? null
+                : (v) async {
+                    setState(() => _cursorOn = v);
+                    await CursorPrefs.save(
+                      on: v,
+                      paste: _cursorPaste,
+                      send: _cursorSend,
+                    );
+                  },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Paste into Cursor'),
+            subtitle: const Text(
+              'Ignore Automation. After each flutter rebuild, Accessibility may need a new openpendant toggle (remove the old row, add the Debug app). Cmd+V always works.',
+            ),
+            value: _cursorPaste,
+            onChanged: !_loaded || !_cursorOn
+                ? null
+                : (v) async {
+                    setState(() => _cursorPaste = v);
+                    await CursorPrefs.save(
+                      on: _cursorOn,
+                      paste: v,
+                      send: _cursorSend,
+                    );
+                  },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Auto-send in Cursor'),
+            subtitle: const Text(
+              'After paste, press Return in Composer. Click the chat input first. Shift+Enter still adds a newline if you type yourself.',
+            ),
+            value: _cursorSend,
+            onChanged: !_loaded || !_cursorOn || !_cursorPaste
+                ? null
+                : (v) async {
+                    setState(() => _cursorSend = v);
+                    await CursorPrefs.save(
+                      on: _cursorOn,
+                      paste: _cursorPaste,
+                      send: v,
+                    );
+                  },
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: !_loaded || !_cursorOn || !_cursorPaste
+                  ? null
+                  : () async {
+                      await Clipboard.setData(
+                        const ClipboardData(text: 'OpenPendant paste test'),
+                      );
+                      final r = await pasteIntoCursorComposer(autoSend: false);
+                      if (!mounted) {
+                        return;
+                      }
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          duration: const Duration(seconds: 8),
+                          content: Text(
+                            r.ok
+                                ? 'Pasted test text. Click Composer first if you do not see it.'
+                                : 'Paste failed: ${r.detail}',
+                          ),
+                        ),
+                      );
+                    },
+              child: const Text('Test paste into Cursor'),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Spoken notes'),
+            subtitle: const Text(
+              'Say “take a note, …” to save a note on Home for that day. You can also type one. Nothing is sent to Google.',
+            ),
+            value: _notesOn,
+            onChanged: !_loaded
+                ? null
+                : (v) async {
+                    setState(() => _notesOn = v);
+                    await NotePrefs.save(on: v);
+                  },
+          ),
+          const SizedBox(height: 8),
           const Text(
             'Home → Clean this day rewrites the selected day’s transcript and writes a structured recap (gpt-4o-mini). Raw STT is kept. An empty Mem0 key does not block Clean.',
           ),
