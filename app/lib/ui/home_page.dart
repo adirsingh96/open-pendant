@@ -13,15 +13,25 @@ import '../audio/speech_vad.dart';
 import '../audio/wav_writer.dart';
 import '../ble/pendant_ble.dart';
 import '../db/clip_store.dart';
+import '../db/day_recap.dart';
 import '../db/models.dart';
 import '../stt/api_key_store.dart';
+import '../stt/openai_refine.dart';
 import '../stt/openai_stt.dart';
-import '../stt/stt_pricing.dart';
+import '../stt/saaras_stt.dart';
+import '../stt/sarvam_key_store.dart';
+import '../stt/stt_prefs.dart';
 import 'clip_page.dart';
 import 'calibrate_page.dart';
+import 'day_recap_card.dart';
+import 'developer_page.dart';
 import 'settings_page.dart';
 import 'voices_page.dart';
 import '../stt/vad_cal.dart';
+import '../db/scene_group.dart';
+import '../mem0/mem0_client.dart';
+import '../mem0/mem0_store.dart';
+import 'memories_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -40,8 +50,10 @@ class _HomePageState extends State<HomePage> {
   final _ble = PendantBle();
   final _store = ClipStore();
   final _stt = OpenAiStt();
+  final _saaras = SaarasStt();
+  final _refine = OpenAiRefine();
+  final _dev = DeveloperLive();
   final _search = TextEditingController();
-  final _liveScroll = ScrollController();
 
   String _status = 'Disconnected. Force-quit nRF Connect first.';
   bool _busy = false;
@@ -61,11 +73,14 @@ class _HomePageState extends State<HomePage> {
   int _seq = 0;
   final _sttQueue = <ClipRecord>[];
   bool _sttBusy = false;
-  List<Object> _homeItems = [];
+  List<SceneGroup> _scenes = [];
   List<TranscriptSegment> _rangeSegs = [];
+  List<ClipRecord> _errorClips = [];
+  DayRecap? _dayRecap;
+  bool _cleaning = false;
+  List<DateTime> _speechDays = [];
   DateTime? _rangeFrom;
   DateTime? _rangeTo;
-  String _liveTranscript = '';
   double _totalCostUsd = 0;
   double _totalBilledS = 0;
   int _totalInTok = 0;
@@ -81,6 +96,10 @@ class _HomePageState extends State<HomePage> {
         setState(() {});
       }
     });
+    SttPrefs.load();
+    final now = DateTime.now();
+    _rangeFrom = DateTime(now.year, now.month, now.day);
+    _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
     _reload();
     _lifecycle = AppLifecycleListener(
       onExitRequested: () async {
@@ -98,7 +117,7 @@ class _HomePageState extends State<HomePage> {
     _armTick?.cancel();
     _lifecycle?.dispose();
     _search.dispose();
-    _liveScroll.dispose();
+    _dev.dispose();
     _ble.disconnect();
     super.dispose();
   }
@@ -110,6 +129,7 @@ class _HomePageState extends State<HomePage> {
     final wasSleep = _imuWasSleep;
     _imuWasSleep = s.imuSleep;
     setState(() => _dbg = s);
+    _syncDev();
     if (!_armed) {
       return;
     }
@@ -126,60 +146,257 @@ class _HomePageState extends State<HomePage> {
   Future<void> _reload() async {
     final cost = await _store.totalCostUsd();
     final usage = await _store.totalUsage();
-    if (_rangeFrom != null && _rangeTo != null) {
-      final segs = await _store.listSegmentsInRange(
-        from: _rangeFrom!,
-        to: _rangeTo!,
-        query: _search.text,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _rangeSegs = segs;
-        _liveTranscript = segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
-        _totalCostUsd = cost;
-        _totalBilledS = usage.billedS;
-        _totalInTok = usage.inputTokens;
-        _totalOutTok = usage.outputTokens;
-      });
-      _scrollLiveToEnd();
-      return;
-    }
-    final items = await _store.listHome(query: _search.text);
-    var live = '';
-    if (_sessionId != null) {
-      for (final item in items) {
-        if (item is SessionGroup && item.sessionId == _sessionId) {
-          live = item.fullText;
-          break;
-        }
-      }
-    } else if (items.isNotEmpty) {
-      final first = items.first;
-      live = first is SessionGroup ? first.fullText : (first as ClipRecord).fullText;
-    }
+    final now = DateTime.now();
+    final from = _rangeFrom ?? DateTime(now.year, now.month, now.day);
+    final to = _rangeTo ?? DateTime(now.year, now.month, now.day, 23, 59, 59);
+    final segs = await _store.listSegmentsInRange(
+      from: from,
+      to: to,
+      query: _search.text,
+    );
+    final allSegs = _search.text.trim().isEmpty
+        ? segs
+        : await _store.listSegmentsInRange(from: from, to: to);
+    final clips = await _store.listClips();
+    final errors = clips
+        .where(
+          (c) =>
+              c.status == 'error' &&
+              !c.startedAt.isBefore(from.toUtc()) &&
+              !c.startedAt.isAfter(to.toUtc()),
+        )
+        .toList();
+    final recap = await _store.getDayRecap(_dayKey(from));
+    final weekStart = DateTime(now.year, now.month, now.day)
+        .subtract(const Duration(days: 6));
+    final speechDays = await _store.listLocalDaysWithSpeech(
+      from: weekStart,
+      to: DateTime(now.year, now.month, now.day, 23, 59, 59),
+    );
     if (!mounted) {
       return;
     }
     setState(() {
-      _homeItems = items;
-      _liveTranscript = live;
+      _scenes = SceneGroup.fromSegments(segs);
+      _rangeSegs = allSegs;
+      _errorClips = errors;
+      _dayRecap = recap;
+      _speechDays = speechDays;
       _totalCostUsd = cost;
       _totalBilledS = usage.billedS;
       _totalInTok = usage.inputTokens;
       _totalOutTok = usage.outputTokens;
     });
-    _scrollLiveToEnd();
+    _syncDev(force: true);
   }
 
-  void _scrollLiveToEnd() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_liveScroll.hasClients) {
+  DateTime _calendarDay(DateTime t) {
+    final l = t.toLocal();
+    return DateTime(l.year, l.month, l.day);
+  }
+
+  bool _sameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  DateTime get _selectedDay {
+    final now = DateTime.now();
+    return _calendarDay(
+      _rangeFrom ?? DateTime(now.year, now.month, now.day),
+    );
+  }
+
+  bool get _recapStale {
+    final recap = _dayRecap;
+    final updated = recap?.updatedAt;
+    if (recap == null || updated == null) {
+      return false;
+    }
+    return _rangeSegs.any((s) => s.spokenAt.isAfter(updated));
+  }
+
+  List<DateTime> _stripDays() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final extra = _speechDays.where(
+      (d) => !_sameDay(d, today) && !_sameDay(d, yesterday),
+    );
+    return [today, yesterday, ...extra];
+  }
+
+  String _stripLabel(DateTime day) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final short = DateFormat('EEE d MMM').format(day);
+    if (_sameDay(day, today)) {
+      return 'Today · $short';
+    }
+    if (_sameDay(day, yesterday)) {
+      return 'Yesterday · $short';
+    }
+    return short;
+  }
+
+  Future<void> _selectDay(DateTime day) {
+    final start = DateTime(day.year, day.month, day.day);
+    return _applyRange(
+      start,
+      DateTime(day.year, day.month, day.day, 23, 59, 59),
+    );
+  }
+
+  String _dayHeading() {
+    final day = _selectedDay;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final full = DateFormat.yMMMMEEEEd().format(day);
+    if (_sameDay(day, today)) {
+      return '$full · Today';
+    }
+    if (_sameDay(day, yesterday)) {
+      return '$full · Yesterday';
+    }
+    return full;
+  }
+
+  String _dayKey(DateTime local) {
+    final d = local.toLocal();
+    return '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _cleanDay() async {
+    final now = DateTime.now();
+    final from = _rangeFrom ?? DateTime(now.year, now.month, now.day);
+    final to = _rangeTo ?? DateTime(now.year, now.month, now.day, 23, 59, 59);
+    final segs = await _store.listSegmentsInRange(from: from, to: to);
+    if (segs.isEmpty) {
+      if (!mounted) {
         return;
       }
-      _liveScroll.jumpTo(_liveScroll.position.maxScrollExtent);
-    });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nothing to clean in this day yet.')),
+      );
+      return;
+    }
+    final key = await ApiKeyStore.read();
+    if (key.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Add an OpenAI API key in Settings first.')),
+      );
+      return;
+    }
+    setState(() => _cleaning = true);
+    try {
+      final result = await _refine.cleanAndRecapDay(
+        apiKey: key,
+        dayKey: _dayKey(from),
+        dateLabel: DateFormat.yMMMMEEEEd().format(from),
+        rangeLabel:
+            '${DateFormat.MMMd().add_jm().format(segs.first.spokenAt.toLocal())} – '
+            '${DateFormat.MMMd().add_jm().format(segs.last.spokenAt.toLocal())} '
+            '(only these recorded turns; do not invent later hours)',
+        segments: segs,
+      );
+      await _store.applyCleanedSegments(result.segments);
+      await _store.upsertDayRecap(
+        recap: result.recap,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      );
+      await _reload();
+      final memStatus = await _syncMem0(
+        recap: result.recap,
+        dateLabel: DateFormat.yMMMMEEEEd().format(from),
+      );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Cleaned ${DateFormat.yMMMMEEEEd().format(from)}. $memStatus',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Clean failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _cleaning = false);
+      }
+    }
+  }
+
+  Future<String> _syncMem0({
+    required DayRecap recap,
+    required String dateLabel,
+  }) async {
+    final memKey = await Mem0Store.readKey();
+    if (memKey.isEmpty) {
+      return 'Mem0 skipped (no MEM0_API_KEY).';
+    }
+    try {
+      final userId = await Mem0Store.userId();
+      await Mem0Client().addRecap(
+        apiKey: memKey,
+        userId: userId,
+        recap: recap,
+        dateLabel: dateLabel,
+      );
+      await Mem0Store.markSynced(
+        Mem0Store.recapMark(recap.dayKey, recap.updatedAt),
+      );
+      return 'Sent recap to Mem0.';
+    } catch (e) {
+      return 'Memory sync failed: $e';
+    }
+  }
+
+  void _syncDev({bool force = false}) {
+    _dev.sync(
+      connected: _connected,
+      armed: _armed,
+      bytes: _bytes,
+      dbg: _dbg,
+      sttQueue: _sttQueue.length + (_sttBusy ? 1 : 0),
+      totalCostUsd: _totalCostUsd,
+      totalBilledS: _totalBilledS,
+      totalInTok: _totalInTok,
+      totalOutTok: _totalOutTok,
+      segments: _rangeSegs,
+      force: force,
+    );
+  }
+
+  String _wearerLabel() {
+    if (!_connected) {
+      return 'Off';
+    }
+    if (!_armed) {
+      return 'Connected';
+    }
+    if (_sttBusy || _sttQueue.isNotEmpty) {
+      return 'Catching up';
+    }
+    if (_dbg?.imuSleep == true) {
+      return 'Resting';
+    }
+    if (_dbg?.micRunning == true) {
+      return 'Listening';
+    }
+    return 'Armed';
   }
 
   Future<bool> _blePerms() async {
@@ -365,6 +582,7 @@ class _HomePageState extends State<HomePage> {
       _hadSpeechInChunk = true;
     }
     setState(() => _bytes = _ble.reassembler.pcmByteLength);
+    _syncDev();
     if (_ble.reassembler.pcmByteLength >= _maxChunkBytes) {
       Future.microtask(() => _rotateChunk());
     }
@@ -394,13 +612,13 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final imu = _dbg == null
-        ? 'IMU …'
-        : (_dbg!.imuSleep ? 'IMU SLEEP' : 'IMU AWAKE');
-    final chunkS = _bytes / 2 / 16000;
+        ? '…'
+        : (_dbg!.imuSleep ? 'Resting' : 'Listening');
     setState(() {
       _status =
-          'Armed — mic gated by IMU · $imu · chunk ${chunkS.toStringAsFixed(0)}s · STT queue ${_sttQueue.length + (_sttBusy ? 1 : 0)}';
+          '${_wearerLabel()}${_dbg == null ? '' : ' · $imu'} · ${_sttEngineLabel()} · queue ${_sttQueue.length + (_sttBusy ? 1 : 0)}';
     });
+    _syncDev();
   }
 
   Future<void> _rotateChunk() async {
@@ -537,13 +755,90 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  String _sttEngineLabel() {
+    if (SttPrefs.useBoth) {
+      return 'OpenAI+Saaras';
+    }
+    if (SttPrefs.useSaarasOnly) {
+      return 'Saaras v4';
+    }
+    return 'OpenAI';
+  }
+
+  List<TranscriptSegment> _sttSegs(TranscriptResult result) {
+    return [
+      for (final s in result.segments)
+        s.copyWith(rawText: s.rawText.trim().isEmpty ? s.text : s.rawText),
+    ];
+  }
+
+  bool _sttHasText(TranscriptResult r) {
+    return r.text.trim().isNotEmpty ||
+        r.segments.any((s) => s.text.trim().isNotEmpty);
+  }
+
+  Future<({TranscriptResult? result, Object? error})> _tryOpenai({
+    required File wav,
+    required String apiKey,
+    required DateTime startedAt,
+    required SpeechExtract speech,
+  }) async {
+    try {
+      return (
+        result: await _stt.transcribe(
+          wav: wav,
+          apiKey: apiKey,
+          startedAt: startedAt,
+          speech: speech,
+        ),
+        error: null,
+      );
+    } catch (e) {
+      return (result: null, error: e);
+    }
+  }
+
+  Future<({TranscriptResult? result, Object? error})> _trySaaras({
+    required File wav,
+    required String apiKey,
+    required DateTime startedAt,
+    required SpeechExtract speech,
+  }) async {
+    try {
+      return (
+        result: await _saaras.transcribe(
+          wav: wav,
+          apiKey: apiKey,
+          startedAt: startedAt,
+          speech: speech,
+        ),
+        error: null,
+      );
+    } catch (e) {
+      return (result: null, error: e);
+    }
+  }
+
   Future<void> _transcribeClip(ClipRecord clip) async {
-    final key = await ApiKeyStore.read();
+    await SttPrefs.load();
     final wavPath = clip.wavPath;
-    if (key.isEmpty || wavPath == null || !File(wavPath).existsSync()) {
+    final openaiKey = await ApiKeyStore.read();
+    final sarvamKey = await SarvamKeyStore.read();
+    final needOpenAi = !SttPrefs.useSaarasOnly;
+    final needSarvam = SttPrefs.useSaaras;
+    if (wavPath == null || !File(wavPath).existsSync()) {
+      await _store.upsertClip(clip.copyWith(status: 'error'));
+      return;
+    }
+    if ((needOpenAi && openaiKey.isEmpty) || (needSarvam && sarvamKey.isEmpty)) {
       await _store.upsertClip(clip.copyWith(status: 'error'));
       if (mounted && !_armed) {
-        setState(() => _status = 'Saved WAV but no API key. Add it in Settings, then Retry.');
+        final missing = [
+          if (needOpenAi && openaiKey.isEmpty) 'OpenAI',
+          if (needSarvam && sarvamKey.isEmpty) 'Sarvam',
+        ].join(' and ');
+        setState(() => _status =
+            'Saved WAV but no $missing API key. Add it in Settings, then Retry.');
       }
       return;
     }
@@ -567,6 +862,7 @@ class _HomePageState extends State<HomePage> {
           costUsd: 0,
           inputTokens: 0,
           outputTokens: 0,
+          clearAlt: true,
         ),
       );
       return;
@@ -574,42 +870,104 @@ class _HomePageState extends State<HomePage> {
 
     final speechPath = p.join(p.dirname(wavPath), '${clip.id}_speech.wav');
     await File(speechPath).writeAsBytes(pcmToWav(pcm: speech.speechPcm), flush: true);
+    final wav = File(speechPath);
     try {
-      final result = await _stt.transcribe(
-        wav: File(speechPath),
-        apiKey: key,
-        startedAt: clip.startedAt,
-        speech: speech,
-      );
-      final hasText = result.text.trim().isNotEmpty ||
-          result.segments.any((s) => s.text.trim().isNotEmpty);
-      if (!hasText) {
+      TranscriptResult? openai;
+      TranscriptResult? saaras;
+      Object? openaiErr;
+      Object? saarasErr;
+      if (SttPrefs.useBoth) {
+        final pair = await Future.wait([
+          _tryOpenai(
+            wav: wav,
+            apiKey: openaiKey,
+            startedAt: clip.startedAt,
+            speech: speech,
+          ),
+          _trySaaras(
+            wav: wav,
+            apiKey: sarvamKey,
+            startedAt: clip.startedAt,
+            speech: speech,
+          ),
+        ]);
+        openai = pair[0].result;
+        openaiErr = pair[0].error;
+        saaras = pair[1].result;
+        saarasErr = pair[1].error;
+      } else if (SttPrefs.useSaarasOnly) {
+        final one = await _trySaaras(
+          wav: wav,
+          apiKey: sarvamKey,
+          startedAt: clip.startedAt,
+          speech: speech,
+        );
+        saaras = one.result;
+        saarasErr = one.error;
+      } else {
+        final one = await _tryOpenai(
+          wav: wav,
+          apiKey: openaiKey,
+          startedAt: clip.startedAt,
+          speech: speech,
+        );
+        openai = one.result;
+        openaiErr = one.error;
+      }
+
+      final openaiOk = openai != null && _sttHasText(openai);
+      final saarasOk = saaras != null && _sttHasText(saaras);
+      final TranscriptResult? primary = openaiOk
+          ? openai
+          : (saarasOk ? saaras : openai ?? saaras);
+      if (primary == null || !_sttHasText(primary)) {
+        if (openaiErr != null || saarasErr != null) {
+          throw openaiErr ?? saarasErr!;
+        }
         await _store.upsertClip(
           clip.copyWith(
             status: 'silence',
             fullText: '',
-            sttModel: result.model,
+            sttModel: openai?.model ?? saaras?.model,
             segments: const [],
             billedS: speech.speechDurationS,
             removedS: speech.originalDurationS - speech.speechDurationS,
-            inputTokens: result.inputTokens,
-            outputTokens: result.outputTokens,
-            costUsd: result.costUsd,
+            inputTokens: openai?.inputTokens ?? 0,
+            outputTokens: openai?.outputTokens ?? 0,
+            costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+            clearAlt: true,
           ),
         );
         return;
       }
+
+      TranscriptResult? alt;
+      var altError = '';
+      if (SttPrefs.useBoth && openaiOk && saarasOk) {
+        alt = saaras;
+      } else if (SttPrefs.useBoth && openaiOk && !saarasOk) {
+        altError = saarasErr?.toString() ?? 'Saaras returned no text';
+      } else if (SttPrefs.useBoth && !openaiOk && saarasOk) {
+        altError = openaiErr?.toString() ?? 'OpenAI returned no text';
+      }
+
       await _store.upsertClip(
         clip.copyWith(
-          fullText: result.text,
-          sttModel: result.model,
+          fullText: primary.text,
+          sttModel: primary.model,
           status: 'ok',
-          segments: result.segments,
+          segments: _sttSegs(primary),
           billedS: speech.speechDurationS,
           removedS: speech.originalDurationS - speech.speechDurationS,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          costUsd: result.costUsd,
+          inputTokens: openai?.inputTokens ?? 0,
+          outputTokens: openai?.outputTokens ?? 0,
+          costUsd: primary.costUsd,
+          altFullText: alt?.text ?? '',
+          altSttModel: alt?.model,
+          altCostUsd: alt?.costUsd ?? 0,
+          altError: altError,
+          altSegments: alt == null ? const [] : _sttSegs(alt),
+          clearAlt: !SttPrefs.useBoth,
         ),
       );
     } catch (e) {
@@ -657,7 +1015,45 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openSettings() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const SettingsPage()),
+      MaterialPageRoute(
+        builder: (_) => SettingsPage(
+          onOpenDeveloper: () {
+            Navigator.of(context).pop();
+            _openDeveloper();
+          },
+          onOpenCalibrate: () {
+            Navigator.of(context).pop();
+            _openCalibrate();
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openDeveloper() async {
+    _syncDev(force: true);
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ListenableBuilder(
+          listenable: _dev,
+          builder: (context, _) => DeveloperPage(
+            live: _dev,
+            rangeBar: _rangeBar(),
+          ),
+        ),
+      ),
+    );
+    await _reload();
+  }
+
+  Future<void> _openMemories() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MemoriesPage(
+          onOpenDay: _selectDay,
+          store: _store,
+        ),
+      ),
     );
   }
 
@@ -746,10 +1142,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _clearRange() async {
+    final now = DateTime.now();
     setState(() {
-      _rangeFrom = null;
-      _rangeTo = null;
-      _rangeSegs = [];
+      _rangeFrom = DateTime(now.year, now.month, now.day);
+      _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
     });
     await _reload();
   }
@@ -761,205 +1157,98 @@ class _HomePageState extends State<HomePage> {
     return DateFormat('MMM d, HH:mm').format(t);
   }
 
-  Widget _liveCard() {
-    final ranging = _rangeFrom != null && _rangeTo != null;
-    final label = ranging
-        ? 'Transcript in range'
-        : (_armed ? 'Live transcript (updates when a chunk finishes)' : 'Latest transcript');
-    final body = _liveTranscript.trim().isEmpty
-        ? (ranging
-            ? 'No speech in this time range yet.'
-            : 'Speech will appear here after OpenAI finishes a chunk.')
-        : _liveTranscript;
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 160),
-              child: SingleChildScrollView(
-                controller: _liveScroll,
-                child: SelectableText(body),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   Widget _rangeBar() {
     final now = DateTime.now();
     final hourStart = DateTime(now.year, now.month, now.day, now.hour);
     final todayStart = DateTime(now.year, now.month, now.day);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Time range', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              OutlinedButton(
-                onPressed: () => _pickBound(isFrom: true),
-                child: Text('From ${_fmtBound(_rangeFrom)}'),
-              ),
-              OutlinedButton(
-                onPressed: () => _pickBound(isFrom: false),
-                child: Text('To ${_fmtBound(_rangeTo)}'),
-              ),
-              if (_rangeFrom != null || _rangeTo != null)
-                TextButton(onPressed: _clearRange, child: const Text('Clear')),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 8,
-            children: [
-              ActionChip(
-                label: const Text('This hour'),
-                onPressed: () => _applyRange(hourStart, now),
-              ),
-              ActionChip(
-                label: const Text('Last hour'),
-                onPressed: () =>
-                    _applyRange(now.subtract(const Duration(hours: 1)), now),
-              ),
-              ActionChip(
-                label: const Text('Today'),
-                onPressed: () => _applyRange(todayStart, now),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _batteryLine(PendantStatus s) {
-    final mv = s.batteryMv;
-    final mvLabel = (mv != null && mv > 0)
-        ? '  rail ${(mv / 1000).toStringAsFixed(2)} V'
-        : '';
-    if (s.usbPowered) {
-      return 'Power: USB$mvLabel  (SoC only when unplugged — charger looks like a full cell)';
-    }
-    final pct = s.batteryPct;
-    if (pct == null || mv == null) {
-      return 'Battery: not seen';
-    }
-    final warn = pct <= 20 ? '  — charge soon' : '';
-    return 'Battery: ~$pct%  (${(mv / 1000).toStringAsFixed(2)} V)$warn';
-  }
-
-  Widget _debugCard() {
-    final s = _dbg;
-    final imuLabel = !_connected
-        ? '—'
-        : (s == null)
-            ? 'waiting (flash IMU firmware if this stays empty)'
-            : s.imuSleep
-                ? 'SLEEP'
-                : 'AWAKE';
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            Text('Debug', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 6),
-            Text('Link: ${_connected ? 'connected' : 'down'}'),
-            Text('Mode: ${_armed ? 'armed (notify on)' : 'idle'}'),
-            Text(VadCal.statusLine()),
-            Text('IMU: $imuLabel'),
-            if (s != null) ...[
-              Text(_batteryLine(s)),
-              Text('Mic: ${s.micRunning ? 'running' : 'stopped'}'),
-              Text(
-                'Chip: ${s.imuReady ? 'LSM6DS3 ready' : 'not ready (sleep will not start)'}',
-              ),
-              Text(
-                'IMU read: ${s.imuFetchOk ? 'ok' : 'fail (still meter stays 0)'}',
-              ),
-              Text('Still meter: ${s.stillHits}/10  (10 still polls → sleep)'),
-              Text('Mic level: ${s.volume}  (info only; host VAD filters noise)'),
-            ],
-            const Text(
-              'Armed: LED stays solid. Sit still ~10s → IMU SLEEP cuts a chunk '
-              '(no OpenAI if quiet). Move and talk → next chunk.',
+            OutlinedButton(
+              onPressed: () => _pickBound(isFrom: true),
+              child: Text('From ${_fmtBound(_rangeFrom)}'),
+            ),
+            OutlinedButton(
+              onPressed: () => _pickBound(isFrom: false),
+              child: Text('To ${_fmtBound(_rangeTo)}'),
+            ),
+            TextButton(onPressed: _clearRange, child: const Text('Today')),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          children: [
+            ActionChip(
+              label: const Text('This hour'),
+              onPressed: () => _applyRange(hourStart, now),
+            ),
+            ActionChip(
+              label: const Text('Last hour'),
+              onPressed: () =>
+                  _applyRange(now.subtract(const Duration(hours: 1)), now),
+            ),
+            ActionChip(
+              label: const Text('Yesterday'),
+              onPressed: () {
+                final y = todayStart.subtract(const Duration(days: 1));
+                _applyRange(
+                  y,
+                  todayStart.subtract(const Duration(milliseconds: 1)),
+                );
+              },
             ),
           ],
         ),
-      ),
+      ],
     );
   }
 
-  void _openItem(Object item) {
-    if (item is SessionGroup) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ClipPage.session(session: item)),
-      );
-    } else if (item is ClipRecord) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ClipPage.single(clip: item)),
-      );
-    }
+  Future<void> _renameSpeaker(String from, String to) async {
+    await _store.renameSpeaker(from: from, to: to);
+    await _reload();
   }
 
-  Widget _homeTile(Object item) {
-    if (item is SessionGroup) {
-      final when = DateFormat.yMMMd().add_Hms().format(item.startedAt.toLocal());
-      final title = item.fullText.isEmpty ? '(${item.status})' : item.fullText;
-      final err = item.clips.where((c) => c.status == 'error').firstOrNull;
-      return ListTile(
-        isThreeLine: true,
-        title: Text(title, maxLines: 6, overflow: TextOverflow.ellipsis),
-        subtitle: Text(
-          '$when  ${item.clips.length} chunks  ${item.status}\n${item.usageLine}',
-        ),
-        trailing: err != null
-            ? TextButton(
-                onPressed: _busy ? null : () => _retry(err),
-                child: const Text('Retry'),
-              )
-            : null,
-        onTap: () => _openItem(item),
-      );
+  Future<void> _openScene(SceneGroup scene, {bool developer = false}) async {
+    final ids = {
+      for (final s in scene.segments)
+        if ((s.clipId ?? '').isNotEmpty) s.clipId!,
+    };
+    final clips = <ClipRecord>[];
+    for (final id in ids) {
+      final c = await _store.getClip(id);
+      if (c != null) {
+        clips.add(c);
+      }
     }
-    final c = item as ClipRecord;
-    final when = DateFormat.yMMMd().add_Hms().format(c.startedAt.toLocal());
-    return ListTile(
-      isThreeLine: true,
-      title: Text(
-        c.fullText.isEmpty ? '(${c.status})' : c.fullText,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ClipPage.range(
+          segments: scene.segments,
+          clips: clips,
+          title: DateFormat.MMMd().add_jm().format(scene.startedAt.toLocal()),
+          onRenameSpeaker: _renameSpeaker,
+          showDeveloper: developer,
+        ),
       ),
-      subtitle: Text('$when  ${c.status}\n${c.usageLine}'),
-      trailing: c.status == 'error'
-          ? TextButton(
-              onPressed: _busy ? null : () => _retry(c),
-              child: const Text('Retry'),
-            )
-          : null,
-      onTap: () => _openItem(c),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final recLabel = _armed ? 'Stop' : 'Record';
+    final selected = _selectedDay;
+    final convosLabel =
+        'Conversations · ${DateFormat.MMMd().format(selected)}';
     return Scaffold(
       appBar: AppBar(
         title: const Text('OpenPendant'),
@@ -984,12 +1273,17 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           IconButton(
-            tooltip: 'Named voices',
+            tooltip: 'Memories',
+            icon: const Icon(Icons.auto_awesome),
+            onPressed: _openMemories,
+          ),
+          IconButton(
+            tooltip: 'People',
             icon: const Icon(Icons.record_voice_over),
             onPressed: _openVoices,
           ),
           IconButton(
-            tooltip: 'API key and settings',
+            tooltip: 'Settings',
             icon: const Icon(Icons.settings),
             onPressed: _openSettings,
           ),
@@ -1016,16 +1310,28 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
                 Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(_status),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                  child: Text(
-                    'STT spend ${SttPricing.formatUsd(_totalCostUsd)}  ·  '
-                    '${_totalBilledS.toStringAsFixed(1)}s billed'
-                    '${(_totalInTok + _totalOutTok) > 0 ? '  ·  $_totalInTok in / $_totalOutTok out tok' : ''}',
-                    style: Theme.of(context).textTheme.titleSmall,
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                  child: Row(
+                    children: [
+                      Chip(
+                        avatar: Icon(
+                          _armed
+                              ? (_dbg?.imuSleep == true
+                                  ? Icons.hotel
+                                  : Icons.graphic_eq)
+                              : Icons.power_settings_new,
+                          size: 18,
+                        ),
+                        label: Text(_wearerLabel()),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _status,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 Padding(
@@ -1045,86 +1351,132 @@ class _HomePageState extends State<HomePage> {
                         child: Text(recLabel),
                       ),
                       OutlinedButton(
-                        onPressed: _busy || (!_connected && !_armed) ? null : _sleep,
+                        onPressed: _busy || (!_connected && !_armed)
+                            ? null
+                            : _sleep,
                         child: const Text('Sleep'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _openCalibrate,
-                        child: const Text('Calibrate'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _openVoices,
-                        child: const Text('Voices'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _openSettings,
-                        child: const Text('Settings'),
                       ),
                     ],
                   ),
                 ),
-                if (_armed)
-                  Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Text('PCM bytes: $_bytes'),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
+                  child: Text(
+                    _dayHeading(),
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                _debugCard(),
-                _rangeBar(),
-                _liveCard(),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final day in _stripDays())
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: FilterChip(
+                              label: Text(_stripLabel(day)),
+                              selected: _sameDay(day, selected),
+                              onSelected: (_) => _selectDay(day),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                  child: Row(
+                    children: [
+                      FilledButton.tonalIcon(
+                        onPressed: _busy || _cleaning ? null : _cleanDay,
+                        icon: _cleaning
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.auto_fix_high),
+                        label: Text(
+                          _cleaning ? 'Cleaning day…' : 'Clean this day',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                DayRecapCard(
+                  day: selected,
+                  recap: _dayRecap,
+                  stale: _recapStale,
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: Text(
+                    convosLabel,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: TextField(
                     controller: _search,
                     decoration: const InputDecoration(
-                      labelText: 'Search transcripts',
+                      hintText: 'Search this day',
                       border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.search),
                     ),
                     onSubmitted: (_) => _reload(),
                     onChanged: (_) => _reload(),
                   ),
                 ),
+                for (final err in _errorClips)
+                  ListTile(
+                    leading: const Icon(Icons.error_outline),
+                    title: const Text('Transcription failed'),
+                    subtitle: Text(DateFormat.jm().format(err.startedAt.toLocal())),
+                    trailing: TextButton(
+                      onPressed: _busy ? null : () => _retry(err),
+                      child: const Text('Retry'),
+                    ),
+                  ),
               ],
             ),
           ),
-          if (_rangeFrom != null && _rangeTo != null)
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, i) {
-                  if (_rangeSegs.isEmpty) {
-                    return const ListTile(
-                      title: Text('No lines in this range.'),
-                    );
-                  }
-                  final s = _rangeSegs[i];
-                  return ListTile(
-                    title: Text(s.labeledText),
-                    subtitle: Text(
-                      [
-                        if (s.speaker != null && s.speaker!.trim().isNotEmpty) s.speaker,
-                        DateFormat.yMMMd().add_Hms().format(s.spokenAt.toLocal()),
-                      ].join('  '),
-                    ),
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => ClipPage.range(
-                            segments: _rangeSegs,
-                            title:
-                                '${_fmtBound(_rangeFrom)} – ${_fmtBound(_rangeTo)}',
-                          ),
-                        ),
-                      );
-                    },
-                  );
-                },
-                childCount: _rangeSegs.isEmpty ? 1 : _rangeSegs.length,
+          if (_scenes.isEmpty)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'No conversations on this day yet.',
+                ),
               ),
             )
           else
             SliverList(
               delegate: SliverChildBuilderDelegate(
-                (context, i) => _homeTile(_homeItems[i]),
-                childCount: _homeItems.length,
+                (context, i) {
+                  final scene = _scenes[i];
+                  final people = scene.displaySpeakers.join(', ');
+                  return Card(
+                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    child: ListTile(
+                      isThreeLine: true,
+                      title: Text(scene.timeRangeLabel()),
+                      subtitle: Text(
+                        [
+                          if (people.isNotEmpty) people,
+                          scene.preview,
+                        ].join('\n'),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => _openScene(scene),
+                      onLongPress: () => _openScene(scene, developer: true),
+                    ),
+                  );
+                },
+                childCount: _scenes.length,
               ),
             ),
         ],

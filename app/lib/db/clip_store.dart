@@ -1,7 +1,11 @@
+import 'dart:convert';
+
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import 'day_recap.dart';
+import 'memory_chat.dart';
 import 'models.dart';
 
 class ClipStore {
@@ -15,7 +19,7 @@ class ClipStore {
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 4,
+      version: 8,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -32,9 +36,19 @@ CREATE TABLE clips (
   removed_s REAL NOT NULL DEFAULT 0,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0
+  cost_usd REAL NOT NULL DEFAULT 0,
+  refine_input_tokens INTEGER NOT NULL DEFAULT 0,
+  refine_output_tokens INTEGER NOT NULL DEFAULT 0,
+  refine_cost_usd REAL NOT NULL DEFAULT 0,
+  alt_stt_model TEXT,
+  alt_full_text TEXT NOT NULL DEFAULT '',
+  alt_cost_usd REAL NOT NULL DEFAULT 0,
+  alt_error TEXT NOT NULL DEFAULT '',
+  alt_segments_json TEXT NOT NULL DEFAULT '[]'
 )''');
         await _createSegmentTable(db);
+        await _createDayRecapTable(db);
+        await _createMemoryChatTable(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -66,6 +80,44 @@ CREATE TABLE clips (
         if (oldVersion < 4) {
           await db.execute('ALTER TABLE segments ADD COLUMN speaker TEXT');
         }
+        if (oldVersion < 5) {
+          await db.execute(
+            'ALTER TABLE clips ADD COLUMN refine_input_tokens INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            'ALTER TABLE clips ADD COLUMN refine_output_tokens INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            'ALTER TABLE clips ADD COLUMN refine_cost_usd REAL NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            "ALTER TABLE segments ADD COLUMN raw_text TEXT NOT NULL DEFAULT ''",
+          );
+          await db.execute(
+            "UPDATE segments SET raw_text = text WHERE raw_text = ''",
+          );
+        }
+        if (oldVersion < 6) {
+          await _createDayRecapTable(db);
+        }
+        if (oldVersion < 7) {
+          await _createMemoryChatTable(db);
+        }
+        if (oldVersion < 8) {
+          await db.execute('ALTER TABLE clips ADD COLUMN alt_stt_model TEXT');
+          await db.execute(
+            "ALTER TABLE clips ADD COLUMN alt_full_text TEXT NOT NULL DEFAULT ''",
+          );
+          await db.execute(
+            'ALTER TABLE clips ADD COLUMN alt_cost_usd REAL NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            "ALTER TABLE clips ADD COLUMN alt_error TEXT NOT NULL DEFAULT ''",
+          );
+          await db.execute(
+            "ALTER TABLE clips ADD COLUMN alt_segments_json TEXT NOT NULL DEFAULT '[]'",
+          );
+        }
       },
     );
     return _db!;
@@ -80,6 +132,7 @@ CREATE TABLE segments (
   end_s REAL NOT NULL,
   spoken_at TEXT NOT NULL,
   text TEXT NOT NULL,
+  raw_text TEXT NOT NULL DEFAULT '',
   speaker TEXT,
   FOREIGN KEY (clip_id) REFERENCES clips(id)
 )''');
@@ -110,6 +163,14 @@ CREATE TABLE segments (
         'input_tokens': clip.inputTokens,
         'output_tokens': clip.outputTokens,
         'cost_usd': clip.costUsd,
+        'refine_input_tokens': clip.refineInputTokens,
+        'refine_output_tokens': clip.refineOutputTokens,
+        'refine_cost_usd': clip.refineCostUsd,
+        'alt_stt_model': clip.altSttModel,
+        'alt_full_text': clip.altFullText,
+        'alt_cost_usd': clip.altCostUsd,
+        'alt_error': clip.altError,
+        'alt_segments_json': jsonEncode(encodeAltSegments(clip.altSegments)),
       }, conflictAlgorithm: ConflictAlgorithm.replace);
       await txn.delete('segments', where: 'clip_id = ?', whereArgs: [clip.id]);
       for (final s in clip.segments) {
@@ -119,6 +180,7 @@ CREATE TABLE segments (
           'end_s': s.endS,
           'spoken_at': s.spokenAt.toUtc().toIso8601String(),
           'text': s.text,
+          'raw_text': s.rawText.trim().isEmpty ? s.text : s.rawText,
           'speaker': s.speaker,
         });
       }
@@ -165,21 +227,302 @@ ORDER BY c.started_at DESC
           )
         : await db.query(
             'segments',
-            where: 'spoken_at >= ? AND spoken_at <= ? AND text LIKE ?',
-            whereArgs: [start, end, '%$q%'],
+            where: 'spoken_at >= ? AND spoken_at <= ? AND (text LIKE ? OR raw_text LIKE ?)',
+            whereArgs: [start, end, '%$q%', '%$q%'],
             orderBy: 'spoken_at ASC',
           );
-    return rows
-        .map(
-          (s) => TranscriptSegment(
-            startS: (s['start_s'] as num).toDouble(),
-            endS: (s['end_s'] as num).toDouble(),
-            spokenAt: DateTime.parse(s['spoken_at'] as String),
-            text: s['text'] as String? ?? '',
-            speaker: s['speaker'] as String?,
-          ),
-        )
-        .toList();
+    return rows.map(_segmentFromRow).toList();
+  }
+
+  /// Local calendar midnights that have at least one segment in [from, to].
+  Future<List<DateTime>> listLocalDaysWithSpeech({
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final segs = await listSegmentsInRange(from: from, to: to);
+    final byKey = <String, DateTime>{};
+    for (final s in segs) {
+      final l = s.spokenAt.toLocal();
+      final day = DateTime(l.year, l.month, l.day);
+      final key =
+          '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+      byKey[key] = day;
+    }
+    final days = byKey.values.toList()
+      ..sort((a, b) => b.compareTo(a));
+    return days;
+  }
+
+  TranscriptSegment _segmentFromRow(Map<String, Object?> s) {
+    final text = s['text'] as String? ?? '';
+    final raw = s['raw_text'] as String? ?? '';
+    return TranscriptSegment(
+      id: s['id'] as int?,
+      clipId: s['clip_id'] as String?,
+      startS: (s['start_s'] as num).toDouble(),
+      endS: (s['end_s'] as num).toDouble(),
+      spokenAt: DateTime.parse(s['spoken_at'] as String),
+      text: text,
+      rawText: raw.trim().isEmpty ? text : raw,
+      speaker: s['speaker'] as String?,
+    );
+  }
+
+  Future<List<TranscriptSegment>> listRecentSegments({
+    required DateTime before,
+    int limit = 4,
+  }) async {
+    final db = await _open();
+    final rows = await db.query(
+      'segments',
+      where: 'spoken_at < ? AND trim(text) != ?',
+      whereArgs: [before.toUtc().toIso8601String(), ''],
+      orderBy: 'spoken_at DESC',
+      limit: limit,
+    );
+    return rows.map(_segmentFromRow).toList().reversed.toList();
+  }
+
+  /// Turns after each day's last Clean. Empty recaps → a short recent tail.
+  Future<List<TranscriptSegment>> listSpeechSinceRecaps(
+    List<DayRecap> recaps, {
+    int noRecapTail = 12,
+    int maxTotal = 24,
+  }) async {
+    if (recaps.isEmpty) {
+      return listRecentSegments(
+        before: DateTime.now().toUtc().add(const Duration(days: 1)),
+        limit: noRecapTail,
+      );
+    }
+    final out = <TranscriptSegment>[];
+    for (final recap in recaps) {
+      final updated = recap.updatedAt;
+      final day = _parseDayKey(recap.dayKey);
+      if (updated == null || day == null) {
+        continue;
+      }
+      final end = DateTime(day.year, day.month, day.day, 23, 59, 59);
+      final from = updated.toUtc().add(const Duration(milliseconds: 1));
+      if (!from.isBefore(end.toUtc())) {
+        continue;
+      }
+      out.addAll(await listSegmentsInRange(from: from, to: end));
+    }
+    out.sort((a, b) => a.spokenAt.compareTo(b.spokenAt));
+    if (out.length <= maxTotal) {
+      return out;
+    }
+    return out.sublist(out.length - maxTotal);
+  }
+
+  DateTime? _parseDayKey(String key) {
+    final p = key.split('-');
+    if (p.length != 3) {
+      return null;
+    }
+    final y = int.tryParse(p[0]);
+    final m = int.tryParse(p[1]);
+    final d = int.tryParse(p[2]);
+    if (y == null || m == null || d == null) {
+      return null;
+    }
+    return DateTime(y, m, d);
+  }
+
+  Future<void> _createMemoryChatTable(DatabaseExecutor db) async {
+    await db.execute('''
+CREATE TABLE memory_chats (
+  id TEXT PRIMARY KEY,
+  asked_at TEXT NOT NULL,
+  question TEXT NOT NULL,
+  answer TEXT,
+  error TEXT,
+  day_keys_json TEXT NOT NULL DEFAULT '[]'
+)''');
+    await db.execute(
+      'CREATE INDEX idx_memory_chats_asked ON memory_chats(asked_at)',
+    );
+  }
+
+  Future<List<MemoryChatTurn>> listMemoryChats() async {
+    final db = await _open();
+    final rows = await db.query('memory_chats', orderBy: 'asked_at ASC');
+    return rows.map(_memoryChatFromRow).toList();
+  }
+
+  Future<void> upsertMemoryChat(MemoryChatTurn turn) async {
+    final db = await _open();
+    await db.insert(
+      'memory_chats',
+      {
+        'id': turn.id,
+        'asked_at': turn.askedAt.toUtc().toIso8601String(),
+        'question': turn.question,
+        'answer': turn.answer,
+        'error': turn.error,
+        'day_keys_json': jsonEncode(turn.dayKeys),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> clearMemoryChats() async {
+    final db = await _open();
+    await db.delete('memory_chats');
+  }
+
+  MemoryChatTurn _memoryChatFromRow(Map<String, Object?> r) {
+    var dayKeys = <String>[];
+    try {
+      final raw = jsonDecode(r['day_keys_json'] as String? ?? '[]');
+      if (raw is List) {
+        dayKeys = raw.map((e) => '$e'.trim()).where((e) => e.isNotEmpty).toList();
+      }
+    } catch (_) {}
+    return MemoryChatTurn(
+      id: r['id'] as String,
+      askedAt: DateTime.tryParse(r['asked_at'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      question: r['question'] as String? ?? '',
+      answer: r['answer'] as String?,
+      error: r['error'] as String?,
+      dayKeys: dayKeys,
+    );
+  }
+
+  Future<void> _createDayRecapTable(DatabaseExecutor db) async {
+    await db.execute('''
+CREATE TABLE day_recaps (
+  day_key TEXT PRIMARY KEY,
+  body_json TEXT NOT NULL,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+)''');
+  }
+
+  Future<void> applyCleanedSegments(List<TranscriptSegment> segs) async {
+    final db = await _open();
+    await db.transaction((txn) async {
+      final clipIds = <String>{};
+      for (final s in segs) {
+        final id = s.id;
+        if (id == null) {
+          continue;
+        }
+        await txn.update(
+          'segments',
+          {
+            'text': s.text,
+            'speaker': s.speaker,
+          },
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+        final cid = s.clipId;
+        if (cid != null && cid.isNotEmpty) {
+          clipIds.add(cid);
+        }
+      }
+      for (final cid in clipIds) {
+        final rows = await txn.query(
+          'segments',
+          where: 'clip_id = ?',
+          whereArgs: [cid],
+          orderBy: 'start_s ASC',
+        );
+        final labeled = rows
+            .map(_segmentFromRow)
+            .map((s) => s.labeledText)
+            .where((t) => t.isNotEmpty)
+            .join(' ');
+        await txn.update(
+          'clips',
+          {'full_text': labeled, 'status': 'ok'},
+          where: 'id = ?',
+          whereArgs: [cid],
+        );
+      }
+    });
+  }
+
+  Future<void> renameSpeaker({
+    required String from,
+    required String to,
+  }) async {
+    final db = await _open();
+    await db.update(
+      'segments',
+      {'speaker': to},
+      where: 'speaker = ?',
+      whereArgs: [from],
+    );
+  }
+
+  Future<DayRecap?> getDayRecap(String dayKey) async {
+    final db = await _open();
+    final rows = await db.query(
+      'day_recaps',
+      where: 'day_key = ?',
+      whereArgs: [dayKey],
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    return _recapFromRow(rows.first);
+  }
+
+  Future<List<DayRecap>> listDayRecaps() async {
+    final db = await _open();
+    final rows = await db.query('day_recaps', orderBy: 'day_key DESC');
+    final out = <DayRecap>[];
+    for (final r in rows) {
+      final recap = _recapFromRow(r);
+      if (recap != null) {
+        out.add(recap);
+      }
+    }
+    return out;
+  }
+
+  DayRecap? _recapFromRow(Map<String, Object?> r) {
+    final dayKey = r['day_key'] as String? ?? '';
+    if (dayKey.isEmpty) {
+      return null;
+    }
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(r['body_json'] as String) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+    return DayRecap.fromJson(
+      dayKey: dayKey,
+      json: json,
+      model: r['model'] as String?,
+      costUsd: (r['cost_usd'] as num?)?.toDouble() ?? 0,
+      updatedAt: DateTime.tryParse(r['updated_at'] as String? ?? ''),
+    );
+  }
+
+  Future<void> upsertDayRecap({
+    required DayRecap recap,
+    required int inputTokens,
+    required int outputTokens,
+  }) async {
+    final db = await _open();
+    await db.insert('day_recaps', {
+      'day_key': recap.dayKey,
+      'body_json': jsonEncode(recap.toJson()),
+      'model': recap.model,
+      'input_tokens': inputTokens,
+      'output_tokens': outputTokens,
+      'cost_usd': recap.costUsd,
+      'updated_at': (recap.updatedAt ?? DateTime.now().toUtc()).toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   /// Home list: session groups (newest first) plus standalone clips.
@@ -259,9 +602,14 @@ ORDER BY c.started_at DESC
   Future<double> totalCostUsd() async {
     final db = await _open();
     final rows = await db.rawQuery(
-      'SELECT COALESCE(SUM(cost_usd), 0) AS t FROM clips',
+      'SELECT COALESCE(SUM(cost_usd), 0) + COALESCE(SUM(refine_cost_usd), 0) + COALESCE(SUM(alt_cost_usd), 0) AS t FROM clips',
     );
-    return (rows.first['t'] as num?)?.toDouble() ?? 0;
+    final clipSum = (rows.first['t'] as num?)?.toDouble() ?? 0;
+    final recapRows = await db.rawQuery(
+      'SELECT COALESCE(SUM(cost_usd), 0) AS t FROM day_recaps',
+    );
+    final recapSum = (recapRows.first['t'] as num?)?.toDouble() ?? 0;
+    return clipSum + recapSum;
   }
 
   Future<({double billedS, int inputTokens, int outputTokens})> totalUsage() async {
@@ -303,17 +651,18 @@ FROM clips
       inputTokens: (row['input_tokens'] as num?)?.toInt() ?? 0,
       outputTokens: (row['output_tokens'] as num?)?.toInt() ?? 0,
       costUsd: (row['cost_usd'] as num?)?.toDouble() ?? 0,
-      segments: segs
-          .map(
-            (s) => TranscriptSegment(
-              startS: (s['start_s'] as num).toDouble(),
-              endS: (s['end_s'] as num).toDouble(),
-              spokenAt: DateTime.parse(s['spoken_at'] as String),
-              text: s['text'] as String? ?? '',
-              speaker: s['speaker'] as String?,
-            ),
-          )
-          .toList(),
+      refineInputTokens: (row['refine_input_tokens'] as num?)?.toInt() ?? 0,
+      refineOutputTokens: (row['refine_output_tokens'] as num?)?.toInt() ?? 0,
+      refineCostUsd: (row['refine_cost_usd'] as num?)?.toDouble() ?? 0,
+      altSttModel: row['alt_stt_model'] as String?,
+      altFullText: row['alt_full_text'] as String? ?? '',
+      altCostUsd: (row['alt_cost_usd'] as num?)?.toDouble() ?? 0,
+      altError: row['alt_error'] as String? ?? '',
+      altSegments: decodeAltSegments(
+        row['alt_segments_json'] as String? ?? '',
+        clipId: id,
+      ),
+      segments: segs.map(_segmentFromRow).toList(),
     );
   }
 }

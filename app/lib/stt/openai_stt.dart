@@ -149,6 +149,7 @@ class OpenAiStt {
           endS: origEnd,
           spokenAt: startedAt.add(Duration(milliseconds: (origStart * 1000).round())),
           text: (m['text'] as String? ?? '').trim(),
+          rawText: (m['text'] as String? ?? '').trim(),
           speaker: (m['speaker'] as String?)?.trim(),
         ),
       );
@@ -164,6 +165,7 @@ class OpenAiStt {
           endS: duration,
           spokenAt: startedAt,
           text: text,
+          rawText: text,
         ),
       );
     }
@@ -247,6 +249,7 @@ class OpenAiStt {
         endS: s.endS,
         spokenAt: s.spokenAt,
         text: s.text,
+        rawText: s.text,
         speaker: speaker ?? s.speaker,
       );
     }).toList();

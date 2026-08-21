@@ -17,7 +17,7 @@ flutter devices
 flutter run
 ```
 
-Paste the OpenAI API key in **Settings**. Never put it in firmware.
+Paste API keys in **Settings**. Transcription can be **OpenAI** or **Saaras v4** (Sarvam batch + speaker labels). Clean this day and Memories still use OpenAI. Never put keys in firmware.
 
 Disconnect nRF Connect first (the pendant allows one BLE connection).
 
