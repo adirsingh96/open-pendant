@@ -16,6 +16,7 @@ import '../audio/speech_vad.dart';
 import '../audio/wav_writer.dart';
 import '../audio/device_mic.dart';
 import '../ble/pendant_ble.dart';
+import '../ble/pendant_prefs.dart';
 import '../db/clip_store.dart';
 import '../db/day_recap.dart';
 import '../db/meeting.dart';
@@ -37,10 +38,18 @@ import 'developer_page.dart';
 import 'settings_page.dart';
 import 'voices_page.dart';
 import 'app_theme.dart';
-import 'meeting_detail_page.dart';
-import 'transcript_bubbles.dart';
+import 'aurora_orb.dart';
+import 'pendant_connect_sheet.dart';
+import 'circle_button.dart';
+import 'edge_glow.dart';
 import 'liquid_glass.dart';
+import 'meeting_detail_page.dart';
 import 'mesh_backdrop.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'page_scaffold.dart';
+import 'pendant_chip.dart';
+import 'transcript_bubbles.dart';
 import '../stt/vad_cal.dart';
 import '../db/scene_group.dart';
 import '../mem0/mem0_client.dart';
@@ -71,7 +80,7 @@ class _HomePageState extends State<HomePage> {
   final _dev = DeveloperLive();
   final _search = TextEditingController();
 
-  String _status = 'Disconnected. Force-quit nRF Connect first.';
+  String _status = '';
   bool _busy = false;
   bool _connected = false;
   bool _armed = false;
@@ -97,6 +106,8 @@ class _HomePageState extends State<HomePage> {
   bool _cleaning = false;
   bool _commandNext = false;
   bool _noteHolding = false;
+  DateTime? _noteStartedAt;
+  Timer? _noteTick;
   bool _noteTempArm = false;
   bool _noteUsingDeviceMic = false;
   bool _noteStopping = false;
@@ -104,6 +115,7 @@ class _HomePageState extends State<HomePage> {
   int _btnSeqSeen = 0;
   bool _btnSeqPrimed = false;
   int _tab = 0;
+  int _libTab = 0;
   bool _showLive = false;
   String _wearerName = '';
   List<double> _levels = [];
@@ -133,6 +145,11 @@ class _HomePageState extends State<HomePage> {
     SttPrefs.load();
     CursorPrefs.load();
     NotePrefs.load();
+    PendantPrefs.load().then((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
     final now = DateTime.now();
     _rangeFrom = DateTime(now.year, now.month, now.day);
     _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
@@ -151,6 +168,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _armTick?.cancel();
+    _noteTick?.cancel();
     _lifecycle?.dispose();
     _search.dispose();
     _dev.dispose();
@@ -165,6 +183,7 @@ class _HomePageState extends State<HomePage> {
     }
     final wasSleep = _imuWasSleep;
     _imuWasSleep = s.imuSleep;
+    PendantPrefs.lastSeen = DateTime.now();
     setState(() {
       _dbg = s;
       final v = (s.volume / 3500).clamp(0.06, 1.0).toDouble();
@@ -245,12 +264,22 @@ class _HomePageState extends State<HomePage> {
         }
         _noteFromByte = from;
       }
+      _noteStartedAt = DateTime.now();
+      _noteTick?.cancel();
+      _noteTick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        if (mounted && _noteHolding) {
+          setState(() {});
+        }
+      });
       if (mounted) {
-        setState(() => _status = 'Note… tap again to save');
+        setState(() {});
       }
     } catch (e) {
       _noteHolding = false;
       _noteTempArm = false;
+      _noteStartedAt = null;
+      _noteTick?.cancel();
+      _noteTick = null;
       if (_noteUsingDeviceMic) {
         await _deviceMic.stop();
       }
@@ -263,6 +292,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _endButtonNote() async {
     await _noteBegin;
+    _noteStartedAt = null;
+    _noteTick?.cancel();
+    _noteTick = null;
     if (!NotePrefs.enabled) {
       return;
     }
@@ -331,12 +363,33 @@ class _HomePageState extends State<HomePage> {
       await _reload();
       _enqueueStt(clip);
       if (mounted) {
-        setState(() => _status = 'Saving note…');
+        setState(() {});
       }
     } catch (e) {
       if (mounted) {
         setState(() => _status = '$e');
       }
+    }
+  }
+
+  /// Note finished transcribing: confirm quietly and take the user to it.
+  void _onNoteSaved() {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 2),
+        content: Text('Note saved'),
+      ),
+    );
+    if (!_armed && !_noteHolding && !_showLive) {
+      setState(() {
+        _tab = 1;
+        _libTab = 1;
+      });
     }
   }
 
@@ -420,14 +473,13 @@ class _HomePageState extends State<HomePage> {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
-    final short = DateFormat('EEE d MMM').format(day);
     if (_sameDay(day, today)) {
-      return 'Today · $short';
+      return 'Today';
     }
     if (_sameDay(day, yesterday)) {
-      return 'Yesterday · $short';
+      return 'Yesterday';
     }
-    return short;
+    return DateFormat('EEE d').format(day);
   }
 
   Future<void> _selectDay(DateTime day) {
@@ -469,7 +521,7 @@ class _HomePageState extends State<HomePage> {
         apiKey: key,
         dayKey: meeting.id,
         dateLabel: 'Meeting ${DateFormat.MMMd().add_jm().format(start)}',
-        rangeLabel: '${DateFormat.MMMd().add_jm().format(start)} – '
+        rangeLabel: '${DateFormat.MMMd().add_jm().format(start)} to '
             '${DateFormat.jm().format(end)} '
             '(only these recorded turns; do not invent later hours)',
         segments: segs,
@@ -578,41 +630,11 @@ class _HomePageState extends State<HomePage> {
     return true;
   }
 
-  Future<void> _connect() async {
-    setState(() {
-      _busy = true;
-      _status = 'Scanning…';
-    });
-    try {
-      if (!await _blePerms()) {
-        throw Exception('Bluetooth permission denied');
-      }
-      final d = await _ble.scan();
-      await _ble.connect(d);
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _connected = true;
-        _autoReconnect = false;
-        _status =
-            'Connected to ${d.platformName}. Click starts a meeting; hold the button for a note.';
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _status = _friendlyBleError(e));
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
   void _onConnectionLost() {
     if (!mounted || _autoReconnect) {
       return;
     }
+    unawaited(PendantPrefs.markSeen());
     if (_usingDeviceMic || _noteUsingDeviceMic) {
       setState(() {
         _connected = false;
@@ -721,6 +743,9 @@ class _HomePageState extends State<HomePage> {
           _status =
               'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
         });
+        unawaited(
+          PendantPrefs.markSeen(deviceName: _ble.device?.platformName),
+        );
         if (resume) {
           await _arm(resumeSession: true);
         }
@@ -745,44 +770,27 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _manualReconnect() async {
-    _autoReconnect = false;
-    setState(() {
-      _busy = true;
-      _status = 'Reconnecting…';
-    });
-    try {
-      if (!await _blePerms()) {
-        throw Exception('Bluetooth permission denied');
-      }
-      await _ble.reconnect();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _connected = true;
-        _status =
-            'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _status = '$e');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
   Future<void> _toggleMeeting() async {
     if (_busy) {
       return;
     }
     if (_armed) {
+      final endedId = _sessionId;
       await _disarm(flush: true, keepSession: false);
       if (mounted) {
         setState(() => _showLive = false);
+      }
+      if (endedId != null) {
+        await _reload();
+        if (!mounted) {
+          return;
+        }
+        for (final m in _meetings) {
+          if (m.id == endedId) {
+            await _openMeeting(m);
+            break;
+          }
+        }
       }
     } else {
       await _arm(resumeSession: false);
@@ -1325,18 +1333,7 @@ class _HomePageState extends State<HomePage> {
             ),
           );
           await _reload();
-          if (mounted) {
-            final preview =
-                text.length > 80 ? '${text.substring(0, 80)}…' : text;
-            final msg = 'Note saved: $preview';
-            setState(() => _status = msg);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                duration: const Duration(seconds: 6),
-                content: Text(msg),
-              ),
-            );
-          }
+          _onNoteSaved();
         }
         return;
       }
@@ -1503,15 +1500,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     await _reload();
-    if (!mounted) {
-      return;
-    }
-    final preview = note.length > 80 ? '${note.substring(0, 80)}…' : note;
-    final msg = 'Note saved: $preview';
-    setState(() => _status = msg);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(duration: const Duration(seconds: 6), content: Text(msg)),
-    );
+    _onNoteSaved();
   }
 
   Future<void> _sleep() async {
@@ -1543,6 +1532,14 @@ class _HomePageState extends State<HomePage> {
           onOpenCalibrate: () {
             Navigator.of(context).pop();
             _openCalibrate();
+          },
+          onOpenVoices: () {
+            Navigator.of(context).pop();
+            _openVoices();
+          },
+          onOpenMemories: () {
+            Navigator.of(context).pop();
+            _openMemories();
           },
         ),
       ),
@@ -1808,7 +1805,7 @@ class _HomePageState extends State<HomePage> {
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Icon(Icons.auto_fix_high),
+              : const Icon(LucideIcons.sparkles, size: 16),
           label: Text(_cleaning ? 'Recapping…' : 'Recap this meeting'),
         ),
         if (meeting.notes.isNotEmpty) ...[
@@ -1828,33 +1825,15 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  String _greeting() {
+  String _greetingWord() {
     final h = DateTime.now().hour;
-    final name = _wearerName.isEmpty ? '' : ', $_wearerName';
     if (h < 12) {
-      return 'Good morning$name.';
+      return 'Good morning';
     }
     if (h < 17) {
-      return 'Good afternoon$name.';
+      return 'Good afternoon';
     }
-    return 'Good evening$name.';
-  }
-
-  String _batteryLabel() {
-    final s = _dbg;
-    if (!_connected) {
-      return _busy ? 'Connecting…' : 'Connect';
-    }
-    if (s == null) {
-      return 'Connected';
-    }
-    if (s.usbPowered) {
-      return 'Connected · USB';
-    }
-    if (s.batteryPct != null) {
-      return 'Connected · ${s.batteryPct}%';
-    }
-    return 'Connected';
+    return 'Good evening';
   }
 
   String get _hostMicLabel {
@@ -1946,21 +1925,6 @@ class _HomePageState extends State<HomePage> {
     return s;
   }
 
-  Future<void> _connectPendant() async {
-    if (_busy) {
-      return;
-    }
-    if (_connected) {
-      await _disconnectPendant();
-      return;
-    }
-    if (_ble.device != null) {
-      await _manualReconnect();
-    } else {
-      await _connect();
-    }
-  }
-
   Future<void> _disconnectPendant() async {
     _autoReconnect = false;
     _resumeAfterReconnect = false;
@@ -1989,42 +1953,217 @@ class _HomePageState extends State<HomePage> {
     await _toggleMeeting();
   }
 
+  // ─── Presentation ─────────────────────────────────────────────────────
+
+  double get _liveLevel => _levels.isEmpty ? 0 : _levels.last;
+
+  String _noteElapsed() {
+    final start = _noteStartedAt;
+    if (start == null) {
+      return '0:00';
+    }
+    final d = DateTime.now().difference(start);
+    final m = d.inMinutes;
+    final s = d.inSeconds.remainder(60);
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  bool get _pendantRecording =>
+      _connected &&
+      ((_armed && !_usingDeviceMic) || (_noteHolding && !_noteUsingDeviceMic));
+
+  PendantChipState _chipState() {
+    if (_connected) {
+      return _pendantRecording
+          ? PendantChipState.recording
+          : PendantChipState.idle;
+    }
+    if (_busy || _autoReconnect) {
+      return PendantChipState.connecting;
+    }
+    return PendantPrefs.paired
+        ? PendantChipState.offline
+        : PendantChipState.unpaired;
+  }
+
+  Future<String?> _connectForSheet() async {
+    if (_connected) {
+      return null;
+    }
+    setState(() => _busy = true);
+    Future<String?> attempt() async {
+      if (!await _blePerms()) {
+        return 'Allow Bluetooth for OpenPendant in System Settings, then try again.';
+      }
+      if (_ble.device != null) {
+        await _ble.reconnect();
+      } else {
+        final d = await _ble.scan();
+        await _ble.connect(d);
+      }
+      if (!mounted) {
+        return null;
+      }
+      setState(() {
+        _connected = true;
+        _autoReconnect = false;
+        _status = '';
+      });
+      unawaited(
+        PendantPrefs.markSeen(deviceName: _ble.device?.platformName),
+      );
+      return null;
+    }
+
+    try {
+      return await attempt().timeout(
+        const Duration(seconds: 35),
+        onTimeout: () =>
+            'Bluetooth did not respond. In System Settings, open Privacy and '
+            'Security, then Bluetooth, and make sure OpenPendant is allowed.',
+      );
+    } catch (e) {
+      return _friendlyBleError(e);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _openConnectFlow() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isDismissible: false,
+      builder: (_) => PendantConnectSheet(
+        connect: _connectForSheet,
+        lastStatus: () => _ble.lastStatus,
+        name: PendantPrefs.paired ? PendantPrefs.name : 'Your pendant',
+      ),
+    );
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onPendantCardTap() {
+    switch (_chipState()) {
+      case PendantChipState.recording:
+        if (_armed) {
+          setState(() => _showLive = true);
+        }
+      case PendantChipState.idle:
+        _showPendantSheet();
+      case PendantChipState.connecting:
+        break;
+      case PendantChipState.offline:
+      case PendantChipState.unpaired:
+        _openConnectFlow();
+    }
+  }
+
+  Future<void> _showPendantSheet() async {
+    final s = _dbg;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) {
+        String battery;
+        if (s == null) {
+          battery = 'Reading';
+        } else if (s.usbPowered) {
+          battery = 'Charging on USB';
+        } else if (s.batteryPct != null) {
+          battery = '${s.batteryPct}%';
+        } else {
+          battery = 'Reading';
+        }
+        final motion = s == null
+            ? 'Reading'
+            : s.imuSleep
+                ? 'Resting, mic paused'
+                : 'Awake';
+        Widget row(String k, String v) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  Text(k.toUpperCase(), style: AppText.micro),
+                  const Spacer(),
+                  Text(v, style: AppText.body.copyWith(fontSize: 13.5)),
+                ],
+              ),
+            );
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(26, 2, 26, 22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SheetHandle(),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: const BoxDecoration(
+                        color: AppColors.accent,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 9),
+                    Text(PendantPrefs.name, style: AppText.title),
+                    const Spacer(),
+                    Text('CONNECTED', style: AppText.microAccent),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                row('Battery', battery),
+                row('Motion', motion),
+                const SizedBox(height: 20),
+                OutlinedButton(
+                  onPressed: () {
+                    Navigator.pop(sheetCtx);
+                    _disconnectPendant();
+                  },
+                  child: const Text('Disconnect'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: () {
+                    Navigator.pop(sheetCtx);
+                    _sleep();
+                  },
+                  child: const Text('Sleep pendant'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _phoneShell({required Widget child, Widget? bottom}) {
-    final wide = MediaQuery.sizeOf(context).width > 640;
     final scaffold = Scaffold(
       backgroundColor: Colors.transparent,
-      body: SafeArea(child: child),
-      bottomNavigationBar: bottom == null
-          ? null
-          : Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: LiquidGlass(
-                radius: 30,
-                child: bottom,
-              ),
-            ),
-    );
-    final layered = Stack(
-      fit: StackFit.expand,
-      children: [
-        const MeshBackdrop(),
-        scaffold,
-      ],
-    );
-    if (!wide) {
-      return layered;
-    }
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        const MeshBackdrop(),
-        Center(
+      body: SafeArea(
+        child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 430),
-            child: scaffold,
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: child,
           ),
         ),
-      ],
+      ),
+      bottomNavigationBar: bottom,
+    );
+    return EdgeGlow(
+      active: _armed || _noteHolding,
+      level: _liveLevel,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [const MeshBackdrop(), scaffold],
+      ),
     );
   }
 
@@ -2032,293 +2171,463 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final live = _armed && _showLive;
     return _phoneShell(
-      bottom: live
-          ? null
-          : NavigationBar(
-              selectedIndex: _tab,
-              onDestinationSelected: (i) => setState(() => _tab = i),
-              destinations: const [
-                NavigationDestination(
-                  icon: Icon(Icons.wb_sunny_outlined),
-                  selectedIcon: Icon(Icons.wb_sunny),
-                  label: 'Today',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.forum_outlined),
-                  selectedIcon: Icon(Icons.forum),
-                  label: 'Meetings',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.bolt_outlined),
-                  selectedIcon: Icon(Icons.bolt),
-                  label: 'Notes',
-                ),
-                NavigationDestination(
-                  icon: Icon(Icons.search),
-                  label: 'Search',
-                ),
-              ],
-            ),
-      child: live ? _liveScreen() : _tabScreen(),
+      bottom: live ? null : _bottomBar(),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 350),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeIn,
+        child: live
+            ? KeyedSubtree(key: const ValueKey('live'), child: _liveScreen())
+            : KeyedSubtree(key: ValueKey('tab$_tab'), child: _tabScreen()),
+      ),
     );
   }
 
   Widget _tabScreen() {
-    switch (_tab) {
-      case 1:
-        return _meetingsTab();
-      case 2:
-        return _notesTab();
-      case 3:
-        return _searchTab();
-      default:
-        return _todayTab();
+    return _tab == 1 ? _libraryTab() : _todayTab();
+  }
+
+  Widget _bottomBar() {
+    Widget tab(int i, String label, IconData icon) {
+      final on = _tab == i;
+      final color = on ? AppColors.ink : AppColors.faint;
+      return InkWell(
+        onTap: () => setState(() => _tab = i),
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 9),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 25, color: color),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontFamily: AppFonts.sans,
+                  fontSize: 10.5,
+                  fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
     }
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.paper,
+        border: Border(top: BorderSide(color: AppColors.line)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(0, 6, 0, 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              tab(0, 'Home', LucideIcons.house),
+              const SizedBox(width: 56),
+              tab(1, 'Library', LucideIcons.library),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _headerRow() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+      padding: const EdgeInsets.fromLTRB(28, 16, 16, 6),
       child: Row(
         children: [
-          const Text(
-            'OpenPendant',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 20,
+          Text.rich(
+            const TextSpan(
+              children: [
+                TextSpan(text: 'open'),
+                TextSpan(
+                  text: '.',
+                  style: TextStyle(color: AppColors.accent),
+                ),
+              ],
+            ),
+            style: const TextStyle(
+              fontFamily: AppFonts.sans,
+              fontWeight: FontWeight.w600,
+              fontSize: 16,
               letterSpacing: -0.4,
+              color: AppColors.ink,
             ),
           ),
           const Spacer(),
-          Flexible(
-            child: GestureDetector(
-              onTap: _busy ? null : _connectPendant,
-              child: LiquidGlass(
-                radius: 20,
-                prominent: !_connected,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 7,
-                  ),
-                  child: Text(
-                    '• ${_batteryLabel()}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: _connected ? AppColors.rule : AppColors.ink,
-                    ),
-                  ),
-                ),
-              ),
+          IconButton(
+            onPressed: _openSettings,
+            tooltip: 'Settings',
+            icon: const Icon(
+              LucideIcons.settings2,
+              size: 19,
+              color: AppColors.muted,
             ),
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_horiz),
-            onSelected: (v) {
-              switch (v) {
-                case 'settings':
-                  _openSettings();
-                case 'people':
-                  _openVoices();
-                case 'memories':
-                  _openMemories();
-                case 'calibrate':
-                  _openCalibrate();
-                case 'developer':
-                  _openDeveloper();
-                case 'sleep':
-                  _sleep();
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'settings', child: Text('Settings')),
-              PopupMenuItem(value: 'people', child: Text('People')),
-              PopupMenuItem(value: 'memories', child: Text('Memories')),
-              PopupMenuItem(value: 'calibrate', child: Text('Calibrate')),
-              PopupMenuItem(value: 'developer', child: Text('Developer')),
-              PopupMenuItem(value: 'sleep', child: Text('Sleep pendant')),
-            ],
           ),
         ],
       ),
     );
   }
 
+  Widget _sectionLabel(String text, {EdgeInsetsGeometry? padding}) {
+    return Padding(
+      padding: padding ?? EdgeInsets.zero,
+      child: Text(text.toUpperCase(), style: AppText.micro),
+    );
+  }
+
   Widget _todayTab() {
-    final recent =
-        <({String title, String sub, IconData icon, VoidCallback tap})>[
-      for (final m in _meetings)
-        (
-          title: m.preview.isEmpty
-              ? m.timeRangeLabel(now: DateTime.now())
-              : m.preview,
-          sub: [
-            m.durationAt(DateTime.now()).inMinutes > 0
-                ? '${m.durationAt(DateTime.now()).inMinutes} min'
-                : SceneGroup.clock(m.startedAt.toLocal()),
-            if (m.recap != null && m.recap!.followUps.isNotEmpty)
-              '${m.recap!.followUps.length} action items',
-            if (m.live || (_armed && m.id == _sessionId)) 'Live',
-          ].join(' · '),
-          icon: Icons.forum_outlined,
-          tap: () {
-            if (_armed && m.id == _sessionId) {
-              setState(() => _showLive = true);
-            } else {
-              _openMeeting(m);
-            }
-          },
-        ),
-      for (final n in _notes)
-        (
-          title: n.text,
-          sub: 'Voice note · ${DateFormat.jm().format(n.createdAt.toLocal())}',
-          icon: Icons.bolt,
-          tap: () => setState(() => _tab = 2),
-        ),
-    ];
+    final meetingsToday = _meetings.length;
+    final notesToday = _notes.length;
+    final hasItems = meetingsToday > 0 || notesToday > 0;
+    final summary = [
+      if (meetingsToday > 0)
+        '$meetingsToday meeting${meetingsToday == 1 ? '' : 's'}',
+      if (notesToday > 0) '$notesToday note${notesToday == 1 ? '' : 's'}',
+    ].join(' · ');
+    final showStatus = _status.isNotEmpty &&
+        !_armed &&
+        !_status.startsWith('Exception') &&
+        !_status.contains('Did not find');
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _headerRow(),
         Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-            children: [
-              Text(
-                _greeting(),
-                style: const TextStyle(
-                  fontSize: 32,
-                  fontWeight: FontWeight.w700,
-                  height: 1.15,
-                  letterSpacing: -0.6,
-                  color: AppColors.ink,
-                ),
-              ),
-              if (_status.isNotEmpty && !_armed) ...[
-                const SizedBox(height: 8),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(28, 0, 28, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Spacer(flex: 3),
                 Text(
-                  _status,
-                  style: const TextStyle(color: AppColors.muted, fontSize: 13),
+                  _wearerName.isEmpty
+                      ? '${_greetingWord()}.'
+                      : '${_greetingWord()},\n$_wearerName.',
+                  style: AppText.display,
                 ),
-              ],
-              const SizedBox(height: 20),
-              _actionCard(
-                prominent: true,
-                fg: AppColors.ink,
-                icon: _armed ? Icons.stop_circle_outlined : Icons.graphic_eq,
-                title: _armed ? 'End meeting' : 'Start a meeting',
-                sub: _armed
-                    ? (_usingDeviceMic
-                        ? 'Recording with this $_hostMicLabel mic'
-                        : 'Or press the pendant once')
-                    : (_connected
-                        ? 'Press pendant once, or tap here.'
-                        : 'Uses this $_hostMicLabel mic. Connect the pendant for necklace audio.'),
-                onTap: _busy ? null : _onStartMeetingTapped,
-              ),
-              const SizedBox(height: 12),
-              _actionCard(
-                prominent: _noteHolding,
-                fg: AppColors.ink,
-                icon: _noteHolding ? Icons.mic : Icons.bolt,
-                iconColor: _noteHolding ? AppColors.ink : AppColors.bolt,
-                title: _noteHolding ? 'Stop note' : 'Capture a quick note',
-                sub: _noteHolding
-                    ? 'Recording — tap to save'
-                    : (_connected
-                        ? 'Tap here, or long-press pendant.'
-                        : 'Uses this $_hostMicLabel mic. Tap to record.'),
-                onTap: _busy ? null : _toggleVoiceNote,
-              ),
-              const SizedBox(height: 28),
-              const Text(
-                'Recent',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 18,
-                  letterSpacing: -0.3,
-                ),
-              ),
-              const SizedBox(height: 8),
-              if (recent.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 12),
+                const SizedBox(height: 20),
+                const AuroraOrb(size: 60),
+                const SizedBox(height: 16),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 300),
                   child: Text(
-                    'Nothing today yet. Start a meeting or capture a note.',
-                    style: TextStyle(color: AppColors.muted),
+                    'Your personal meeting assistant.',
+                    style: AppText.sub.copyWith(fontSize: 14),
                   ),
-                )
-              else
-                for (final r in recent.take(8))
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: CircleAvatar(
-                      backgroundColor: AppColors.mint,
-                      child: Icon(r.icon, color: AppColors.ink, size: 18),
-                    ),
-                    title: Text(
-                      r.title,
-                      maxLines: 1,
+                ),
+                if (showStatus) ...[
+                  const SizedBox(height: 10),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 300),
+                    child: Text(
+                      _status,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      style: AppText.sub.copyWith(
+                        fontSize: 11.5,
+                        color: AppColors.faint,
+                      ),
                     ),
-                    subtitle: Text(r.sub),
-                    trailing:
-                        const Icon(Icons.chevron_right, color: AppColors.muted),
-                    onTap: r.tap,
                   ),
-            ],
+                ],
+                const Spacer(flex: 2),
+                _pendantCard(),
+                if (hasItems) ...[
+                  const SizedBox(height: 8),
+                  _todayRow(summary),
+                ],
+                const Spacer(flex: 2),
+                _sectionLabel('Capture'),
+                const SizedBox(height: 12),
+                _captureCards(),
+                const Spacer(flex: 2),
+              ],
+            ),
           ),
         ),
       ],
     );
   }
 
-  Widget _actionCard({
-    required Color fg,
+  Widget _pendantCard() {
+    final state = _chipState();
+    IconData icon;
+    String title;
+    String caption;
+    var invite = false;
+    var rec = false;
+    switch (state) {
+      case PendantChipState.unpaired:
+        invite = true;
+        icon = LucideIcons.bluetooth;
+        title = 'Connect your pendant';
+        caption = 'Wear it and capture all day, hands free';
+      case PendantChipState.offline:
+        icon = LucideIcons.bluetoothOff;
+        title = 'Pendant offline';
+        final seen = PendantPrefs.lastSeenLabel();
+        caption = seen.isEmpty
+            ? 'Tap to reconnect'
+            : 'Last seen $seen · tap to reconnect';
+      case PendantChipState.connecting:
+        icon = LucideIcons.bluetooth;
+        title = 'Connecting';
+        caption = 'Looking for ${PendantPrefs.name}';
+      case PendantChipState.idle:
+        icon = LucideIcons.bluetooth;
+        final s = _dbg;
+        title = 'Pendant connected';
+        if (s == null) {
+          caption = 'Ready';
+        } else if (s.usbPowered) {
+          caption = 'Charging on USB';
+        } else if (s.batteryPct != null) {
+          caption = '${s.batteryPct}% battery';
+        } else {
+          caption = 'Ready';
+        }
+      case PendantChipState.recording:
+        rec = true;
+        icon = LucideIcons.audioLines;
+        title = 'Recording from pendant';
+        caption =
+            _noteHolding ? 'Capturing a note' : _meetingElapsed();
+    }
+    return Surface(
+      radius: 18,
+      prominent: invite || rec,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _onPendantCardTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: invite || rec
+                        ? AppColors.accentSoft
+                        : const Color(0x14FFFFFF),
+                    shape: BoxShape.circle,
+                  ),
+                  child: state == PendantChipState.connecting
+                      ? const Padding(
+                          padding: EdgeInsets.all(11),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.6,
+                            color: AppColors.muted,
+                          ),
+                        )
+                      : Icon(
+                          icon,
+                          size: 17,
+                          color: invite || rec
+                              ? AppColors.accentDeep
+                              : state == PendantChipState.idle
+                                  ? AppColors.ink
+                                  : AppColors.muted,
+                        ),
+                ),
+                const SizedBox(width: 13),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: AppText.label.copyWith(fontSize: 14),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        caption,
+                        style: AppText.sub.copyWith(
+                          fontSize: 11.5,
+                          color: rec ? AppColors.accentDeep : AppColors.muted,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (state == PendantChipState.idle)
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: const BoxDecoration(
+                      color: AppColors.accent,
+                      shape: BoxShape.circle,
+                    ),
+                  )
+                else if (rec)
+                  const _PulseDot(),
+                const SizedBox(width: 8),
+                const Icon(LucideIcons.chevronRight,
+                    size: 16, color: AppColors.faint),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _todayRow(String summary) {
+    return InkWell(
+      onTap: () => setState(() => _tab = 1),
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            const Icon(LucideIcons.layers, size: 15, color: AppColors.muted),
+            const SizedBox(width: 13),
+            Text(
+              'Today',
+              style: AppText.body.copyWith(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const Spacer(),
+            Flexible(
+              child: Text(
+                summary,
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.sub.copyWith(fontSize: 12.5),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Icon(LucideIcons.chevronRight,
+                size: 15, color: AppColors.faint),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _captureCards() {
+    final noteActive = _noteHolding || _noteTempArm || _noteUsingDeviceMic;
+    return IntrinsicHeight(
+      child: Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: _captureCard(
+            icon: _armed ? LucideIcons.audioLines : LucideIcons.mic,
+            title: _armed ? 'Recording' : 'Start meeting',
+            sub: _armed
+                ? '${_meetingElapsed()} · tap to open'
+                : 'Records and transcribes live',
+            filled: true,
+            active: _armed,
+            onTap: _busy
+                ? null
+                : _armed
+                    ? () => setState(() => _showLive = true)
+                    : _onStartMeetingTapped,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _captureCard(
+            icon: noteActive ? LucideIcons.circleStop : LucideIcons.notebookPen,
+            title: noteActive ? 'Recording note' : 'Take a note',
+            sub: noteActive
+                ? '${_noteElapsed()} · tap to save'
+                : 'A quick spoken thought',
+            filled: false,
+            active: noteActive,
+            onTap: _busy ? null : _toggleVoiceNote,
+          ),
+        ),
+      ],
+      ),
+    );
+  }
+
+  Widget _captureCard({
     required IconData icon,
     required String title,
     required String sub,
     required VoidCallback? onTap,
-    Color? iconColor,
-    bool prominent = false,
+    required bool filled,
+    bool active = false,
   }) {
-    final radius = BorderRadius.circular(28);
-    return LiquidGlass(
-      radius: 28,
-      prominent: prominent,
+    return Surface(
+      radius: 20,
+      prominent: active,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: radius,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 15),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(icon, size: 22, color: iconColor ?? AppColors.rule),
-                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: filled || active
+                            ? AppColors.accent
+                            : AppColors.accentSoft,
+                        shape: BoxShape.circle,
+                        boxShadow: filled || active
+                            ? const [
+                                BoxShadow(
+                                  color: Color(0x40FF4D00),
+                                  blurRadius: 16,
+                                  offset: Offset(0, 5),
+                                ),
+                              ]
+                            : null,
+                      ),
+                      child: Icon(
+                        icon,
+                        size: 18,
+                        color: filled || active
+                            ? Colors.white
+                            : AppColors.accentDeep,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (active) const _PulseDot(),
+                  ],
+                ),
+                const SizedBox(height: 14),
                 Text(
                   title,
-                  style: TextStyle(
-                    color: fg,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 22,
-                    letterSpacing: -0.4,
+                  style: AppText.label.copyWith(
+                    fontSize: 14.5,
+                    color: active ? AppColors.accentDeep : AppColors.ink,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 3),
                 Text(
                   sub,
-                  style: TextStyle(
-                    color: fg.withValues(alpha: 0.62),
-                    fontSize: 13,
-                    height: 1.35,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.sub.copyWith(
+                    fontSize: 11.5,
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
                 ),
               ],
@@ -2329,370 +2638,593 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _meetingsTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _headerRow(),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-          child: Text(
-            'Meetings · ${DateFormat.MMMd().format(_selectedDay)}',
-            style: const TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 20,
-              letterSpacing: -0.4,
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (final day in _stripDays())
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(_stripLabel(day)),
-                      selected: _sameDay(day, _selectedDay),
-                      onSelected: (_) => _selectDay(day),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-        Expanded(
-          child: _meetings.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text(
-                    'No meetings this day. Press the pendant or start from Today.',
-                    style: TextStyle(color: AppColors.muted),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
-                  itemCount: _meetings.length,
-                  itemBuilder: (context, i) {
-                    final meeting = _meetings[i];
-                    final live = _armed && meeting.id == _sessionId;
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: LiquidGlass(
-                        radius: 22,
-                        blur: false,
-                        child: ListTile(
-                          title: Text(
-                            [
-                              if (live) 'Live · ',
-                              meeting.timeRangeLabel(now: DateTime.now()),
-                            ].join(),
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          subtitle: Text(
-                            meeting.preview.isEmpty
-                                ? 'No transcript yet'
-                                : meeting.preview,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: const Icon(Icons.chevron_right),
-                          onTap: () {
-                            if (live) {
-                              setState(() => _showLive = true);
-                            } else {
-                              _openMeeting(meeting);
-                            }
-                          },
-                          onLongPress: () =>
-                              _openMeeting(meeting, developer: true),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _notesTab() {
+  Widget _libraryTab() {
     final meetingById = {for (final m in _meetings) m.id: m};
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _headerRow(),
-        const Padding(
-          padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
-          child: Text(
-            'Notes',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 20,
-              letterSpacing: -0.4,
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-          child: FilledButton.tonal(
-            onPressed: _busy ? null : _toggleVoiceNote,
-            child: Text(_noteHolding ? 'Stop note' : 'Capture a quick note'),
-          ),
-        ),
-        Expanded(
-          child: _notes.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text(
-                    'No notes this day. Tap to record on this device, or long-press the pendant.',
-                    style: TextStyle(color: AppColors.muted),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
-                  itemCount: _notes.length,
-                  itemBuilder: (context, i) {
-                    final n = _notes[i];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: LiquidGlass(
-                        radius: 22,
-                        blur: false,
-                        child: ListTile(
-                          title: Text(n.text),
-                          subtitle: Text(_noteSubtitle(n, meetingById)),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () async {
-                              await _store.deleteNote(n.id);
-                              await _reload();
-                            },
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _searchTab() {
-    final meetingById = {for (final m in _meetings) m.id: m};
+    final searching = _search.text.trim().isNotEmpty;
+    final showMeetings = _libTab == 0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _headerRow(),
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-          child: TextField(
-            controller: _search,
-            decoration: InputDecoration(
-              hintText: 'Search notes and meetings',
-              prefixIcon: const Icon(Icons.search),
-              filled: true,
-              fillColor: const Color(0x99FFFFFF),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(24),
-                borderSide: BorderSide.none,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(24),
-                borderSide: BorderSide.none,
-              ),
-            ),
-            onChanged: (_) => _reload(),
-            onSubmitted: (_) => _reload(),
-          ),
+          padding: const EdgeInsets.fromLTRB(28, 6, 28, 16),
+          child: Text('Library', style: AppText.display.copyWith(fontSize: 26)),
         ),
-        Expanded(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 0, 28, 14),
+          child: _searchBar(),
+        ),
+        SizedBox(
+          height: 34,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 28),
             children: [
-              for (final n in _notes)
-                ListTile(
-                  leading: const Icon(Icons.bolt, color: AppColors.teal),
-                  title: Text(n.text),
-                  subtitle: Text(_noteSubtitle(n, meetingById)),
-                  onTap: () => setState(() => _tab = 2),
-                ),
-              for (final m in _meetings)
-                ListTile(
-                  leading:
-                      const Icon(Icons.forum_outlined, color: AppColors.teal),
-                  title: Text(
-                    m.preview.isEmpty
-                        ? m.timeRangeLabel(now: DateTime.now())
-                        : m.preview,
-                  ),
-                  subtitle: Text(m.timeRangeLabel(now: DateTime.now())),
-                  onTap: () => _openMeeting(m),
-                ),
-              if (_notes.isEmpty && _meetings.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text(
-                    'No matches this day.',
-                    style: TextStyle(color: AppColors.muted),
-                  ),
+              for (final day in _stripDays())
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: _dayChip(day),
                 ),
             ],
           ),
         ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 18, 28, 4),
+          child: Row(
+            children: [
+              _underlineTab(
+                'Meetings${_meetings.isEmpty ? '' : ' ${_meetings.length}'}',
+                _libTab == 0,
+                () => setState(() => _libTab = 0),
+              ),
+              _underlineTab(
+                'Notes${_notes.isEmpty ? '' : ' ${_notes.length}'}',
+                _libTab == 1,
+                () => setState(() => _libTab = 1),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: showMeetings
+              ? _meetings.isEmpty
+                  ? _libraryEmpty(
+                      searching,
+                      searching
+                          ? 'Try different words, or another day.'
+                          : 'Meetings you record will land here.',
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+                      children: [
+                        for (final m in _meetings) _meetingRow(m),
+                      ],
+                    )
+              : _notes.isEmpty
+                  ? _libraryEmpty(
+                      searching,
+                      searching
+                          ? 'Try different words, or another day.'
+                          : 'Spoken notes you capture will land here.',
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+                      children: [
+                        for (final n in _notes) _noteRow(n, meetingById),
+                      ],
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _underlineTab(String label, bool on, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 22),
+      child: GestureDetector(
+        onTap: onTap,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: AppText.label.copyWith(
+                fontSize: 13.5,
+                fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                color: on ? AppColors.ink : AppColors.faint,
+              ),
+            ),
+            const SizedBox(height: 6),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOut,
+              width: on ? 18 : 0,
+              height: 2,
+              decoration: BoxDecoration(
+                color: AppColors.accent,
+                borderRadius: BorderRadius.circular(1),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _searchBar() {
+    final hasText = _search.text.isNotEmpty;
+    return TextField(
+      controller: _search,
+      style: AppText.body.copyWith(fontSize: 13.5),
+      cursorColor: AppColors.ink,
+      decoration: InputDecoration(
+        hintText: 'Search',
+        prefixIcon: const Padding(
+          padding: EdgeInsets.only(left: 6),
+          child: Icon(LucideIcons.search, size: 16, color: AppColors.faint),
+        ),
+        prefixIconConstraints:
+            const BoxConstraints(minWidth: 42, minHeight: 20),
+        suffixIcon: hasText
+            ? IconButton(
+                icon: const Icon(LucideIcons.x,
+                    size: 15, color: AppColors.muted),
+                onPressed: () {
+                  _search.clear();
+                  _reload();
+                },
+              )
+            : null,
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(vertical: 13),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(24),
+          borderSide: const BorderSide(color: AppColors.line),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(24),
+          borderSide: const BorderSide(color: AppColors.line),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(24),
+          borderSide: const BorderSide(color: AppColors.muted, width: 1.2),
+        ),
+      ),
+      onChanged: (_) => _reload(),
+      onSubmitted: (_) => _reload(),
+    );
+  }
+
+  Widget _libraryEmpty(bool searching, String caption) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: const Color(0x0FFFFFFF),
+                shape: BoxShape.circle,
+                border: Border.all(color: AppColors.line),
+              ),
+              child: Icon(
+                searching ? LucideIcons.search : LucideIcons.audioLines,
+                size: 22,
+                color: AppColors.faint,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              searching ? 'No matches' : 'Nothing here yet',
+              style: AppText.title.copyWith(fontSize: 15),
+            ),
+            const SizedBox(height: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 240),
+              child: Text(
+                caption,
+                textAlign: TextAlign.center,
+                style: AppText.sub.copyWith(fontSize: 12.5),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dayChip(DateTime day) {
+    final on = _sameDay(day, _selectedDay);
+    return GestureDetector(
+      onTap: () => _selectDay(day),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: on ? AppColors.ink : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: on ? AppColors.ink : AppColors.lineStrong),
+        ),
+        child: Text(
+          _stripLabel(day),
+          style: TextStyle(
+            fontFamily: AppFonts.sans,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
+            color: on ? AppColors.paper : AppColors.muted,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _meetingRow(MeetingRecord meeting) {
+    final live = _armed && meeting.id == _sessionId;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () {
+              if (live) {
+                setState(() => _showLive = true);
+              } else {
+                _openMeeting(meeting);
+              }
+            },
+            onLongPress: () => _openMeeting(meeting, developer: true),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 13, 10, 13),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      if (live) ...[
+                        const _PulseDot(),
+                        const SizedBox(width: 6),
+                        Text('LIVE', style: AppText.microAccent),
+                        const SizedBox(width: 10),
+                      ],
+                      Text(
+                        meeting.timeRangeLabel(now: DateTime.now()),
+                        style: AppText.monoSmall.copyWith(fontSize: 11),
+                      ),
+                      const Spacer(),
+                      const Icon(LucideIcons.chevronRight,
+                          size: 15, color: AppColors.faint),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    meeting.preview.isEmpty
+                        ? 'No transcript yet'
+                        : meeting.preview,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.body.copyWith(
+                      fontSize: 14,
+                      height: 1.45,
+                      color: meeting.preview.isEmpty
+                          ? AppColors.faint
+                          : AppColors.ink,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const Divider(indent: 10, endIndent: 10),
+      ],
+    );
+  }
+
+  Widget _noteRow(SpokenNote n, Map<String, MeetingRecord> meetingById) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 12, 4, 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      n.text,
+                      style: AppText.body.copyWith(fontSize: 14, height: 1.45),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _noteSubtitle(n, meetingById),
+                      style: AppText.sub.copyWith(
+                        fontSize: 11,
+                        color: AppColors.faint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(LucideIcons.x,
+                    size: 14, color: AppColors.faint),
+                tooltip: 'Delete note',
+                onPressed: () async {
+                  await _store.deleteNote(n.id);
+                  await _reload();
+                },
+              ),
+            ],
+          ),
+        ),
+        const Divider(indent: 10, endIndent: 10),
       ],
     );
   }
 
   Widget _liveScreen() {
     final meeting = _currentMeeting;
-    final title = meeting?.recap?.headline.trim().isNotEmpty == true
-        ? meeting!.recap!.headline.trim()
-        : 'Meeting';
-    final imu = _dbg?.imuSleep == true;
     final segs = meeting?.segments ?? const <TranscriptSegment>[];
+    final imuSleep = _dbg?.imuSleep == true;
+    String statusLabel;
+    var statusWarn = false;
+    if (!_usingDeviceMic && !_connected) {
+      statusLabel = 'Pendant out of range, reconnecting';
+      statusWarn = true;
+    } else if (imuSleep && !_usingDeviceMic) {
+      statusLabel = 'Resting · mic paused';
+    } else if (_usingDeviceMic) {
+      statusLabel = '$_hostMicLabel mic · listening';
+    } else {
+      statusLabel = 'Pendant · listening';
+    }
+    final headline = meeting?.recap?.headline.trim().isNotEmpty == true
+        ? meeting!.recap!.headline.trim()
+        : 'your meeting';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(4, 4, 12, 0),
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
           child: Row(
             children: [
-              IconButton(
-                onPressed: () => setState(() => _showLive = false),
-                icon: const Icon(Icons.arrow_back_ios_new, size: 18),
+              CircleIconButton(
+                icon: LucideIcons.chevronDown,
+                onTap: () => setState(() => _showLive = false),
+                tooltip: 'Back, keeps recording',
               ),
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 18,
-                    letterSpacing: -0.3,
-                  ),
-                ),
-              ),
-              LiquidGlass(
-                radius: 16,
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  child: const Text(
-                    '• LIVE',
-                    style: TextStyle(
-                      color: AppColors.live,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ),
+              const Spacer(),
+              _livePill(),
+              const Spacer(),
+              const SizedBox(width: 38),
             ],
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 18),
+        Text(
+          'Recording',
+          textAlign: TextAlign.center,
+          style: AppText.body.copyWith(
+            fontSize: 18,
+            fontWeight: FontWeight.w500,
+            color: AppColors.muted,
+          ),
+        ),
+        Text(
+          headline,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppText.headline.copyWith(fontSize: 20),
+        ),
+        SizedBox(
+          height: 190,
+          child: Center(
+            child: AuroraOrb(size: 240, level: _liveLevel),
+          ),
+        ),
         Text(
           _meetingElapsed().isEmpty ? '00:00' : _meetingElapsed(),
           textAlign: TextAlign.center,
-          style: const TextStyle(
-            fontSize: 56,
-            fontWeight: FontWeight.w200,
-            letterSpacing: 1.5,
-            color: AppColors.ink,
-          ),
+          style: AppText.timer.copyWith(fontSize: 36),
         ),
-        const Text(
-          'Recording',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: AppColors.live,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 10),
-        Center(
-          child: LiquidGlass(
-            radius: 20,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              child: Text(
-                _usingDeviceMic
-                    ? 'Recording with this $_hostMicLabel mic'
-                    : (_connected
-                        ? (imu
-                            ? 'OpenPendant connected · resting'
-                            : 'OpenPendant connected · audio clear')
-                        : 'Pendant disconnected'),
-                style: const TextStyle(
-                  color: AppColors.rule,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(28, 18, 28, 8),
-          child: _WaveBars(levels: _levels),
-        ),
+        const SizedBox(height: 13),
+        Center(child: _statusPill(statusLabel, warn: statusWarn)),
+        const SizedBox(height: 8),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+            padding: const EdgeInsets.fromLTRB(28, 10, 28, 8),
             children: [
-              TranscriptThread(segments: segs),
+              TranscriptThread(
+                segments: segs,
+                dark: true,
+                empty: 'Words will appear here as they are heard.',
+              ),
             ],
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 6),
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _markMoment,
-                  child: const Text('+ Mark moment'),
-                ),
+              _liveCircleButton(
+                icon: LucideIcons.bookmarkPlus,
+                label: 'Mark',
+                onTap: _markMoment,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _busy ? null : _toggleVoiceNote,
-                  child: Text(_noteHolding ? 'Stop note' : '+ Private note'),
-                ),
+              const SizedBox(width: 30),
+              _stopButton(),
+              const SizedBox(width: 30),
+              _liveCircleButton(
+                icon: _noteHolding ? LucideIcons.circleStop : LucideIcons.mic,
+                label: 'Note',
+                active: _noteHolding,
+                onTap: _busy ? null : _toggleVoiceNote,
               ),
             ],
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppColors.live,
-              side: const BorderSide(color: Color(0x66FF3B30)),
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: const StadiumBorder(),
-            ),
-            onPressed: _busy ? null : _toggleMeeting,
-            child: const Column(
-              children: [
-                Text(
-                  'End meeting',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                ),
-                Text(
-                  'or press pendant once',
-                  style: TextStyle(fontSize: 12, color: AppColors.muted),
-                ),
-              ],
-            ),
+          padding: const EdgeInsets.only(bottom: 16, top: 2),
+          child: Text(
+            _connected
+                ? 'Stop ends the meeting, or press the pendant once'
+                : 'Stop ends the meeting',
+            textAlign: TextAlign.center,
+            style: AppText.sub.copyWith(fontSize: 11.5),
           ),
         ),
       ],
+    );
+  }
+
+  Widget _livePill() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0x14FFFFFF),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const _PulseDot(),
+          const SizedBox(width: 7),
+          Text('LIVE', style: AppText.micro.copyWith(color: AppColors.ink)),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusPill(String label, {bool warn = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: warn ? const Color(0x66FF4D00) : AppColors.lineStrong,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: warn ? AppColors.accent : const Color(0xFF5FBF82),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: AppText.sub.copyWith(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: warn ? const Color(0xFFFFA37D) : AppColors.muted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stopButton() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Material(
+          color: AppColors.accent,
+          shape: const CircleBorder(),
+          elevation: 0,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: _busy ? null : _toggleMeeting,
+            child: Container(
+              width: 70,
+              height: 70,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Color(0x4DFF4D00),
+                    blurRadius: 26,
+                    offset: Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text('STOP', style: AppText.micro.copyWith(fontSize: 10)),
+      ],
+    );
+  }
+
+  Widget _liveCircleButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onTap,
+    bool active = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Material(
+            color: active ? AppColors.accent : const Color(0x14FFFFFF),
+            shape: CircleBorder(
+              side: BorderSide(
+                color: active ? AppColors.accent : AppColors.lineStrong,
+              ),
+            ),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onTap,
+              child: SizedBox(
+                width: 52,
+                height: 52,
+                child: Icon(
+                  icon,
+                  size: 20,
+                  color: active ? Colors.white : AppColors.ink,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label.toUpperCase(),
+            style: AppText.micro.copyWith(fontSize: 10),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2706,36 +3238,40 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-class _WaveBars extends StatelessWidget {
-  const _WaveBars({required this.levels});
+/// A small dot that breathes. Live and recording indicators.
+class _PulseDot extends StatefulWidget {
+  const _PulseDot();
 
-  final List<double> levels;
+  @override
+  State<_PulseDot> createState() => _PulseDotState();
+}
+
+class _PulseDotState extends State<_PulseDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final bars = levels.isEmpty ? List<double>.filled(20, 0.12) : levels;
-    return SizedBox(
-      height: 56,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          for (final l in bars)
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 1.2),
-                child: FractionallySizedBox(
-                  heightFactor: l.clamp(0.08, 1.0),
-                  alignment: Alignment.bottomCenter,
-                  child: const DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: AppColors.rule,
-                      borderRadius: BorderRadius.all(Radius.circular(1)),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
+    return FadeTransition(
+      opacity: Tween(begin: 1.0, end: 0.3).animate(
+        CurvedAnimation(parent: _c, curve: Curves.easeInOut),
+      ),
+      child: Container(
+        width: 7,
+        height: 7,
+        decoration: const BoxDecoration(
+          color: AppColors.accent,
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }

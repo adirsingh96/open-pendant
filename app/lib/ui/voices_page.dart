@@ -2,10 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
 import '../audio/wav_writer.dart';
 import '../ble/pendant_ble.dart';
 import '../stt/voice_store.dart';
-import 'app_page.dart';
+import 'app_theme.dart';
+import 'liquid_glass.dart';
+import 'page_scaffold.dart';
 
 class VoicesPage extends StatefulWidget {
   const VoicesPage({
@@ -75,7 +79,7 @@ class _VoicesPageState extends State<VoicesPage> {
     final name = VoiceStore.sanitizeName(_name.text);
     if (name.isEmpty) {
       setState(
-          () => _status = 'Enter a name, then record 2–10 seconds of speech.');
+          () => _status = 'Enter a name, then record 2 to 10 seconds of speech.');
       return;
     }
     setState(() {
@@ -140,47 +144,31 @@ class _VoicesPageState extends State<VoicesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return AppPage(
-      appBar: AppBar(title: const Text('Voices')),
+    return PageScaffold(
+      title: 'People',
+      caption:
+          'Record a short sample per person so transcripts can carry names. '
+          'Samples stay on this computer.',
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(28, 12, 28, 28),
         children: [
-          const Text(
-            'Type a name, then tap Record and read the script below out loud. '
-            'Aim for the full paragraph (about 8–10 seconds). Up to 4 voices. '
-            'A local speaker model matches these samples; Saaras only writes the words.',
-          ),
-          const SizedBox(height: 12),
-          Card(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          Text('READ THIS ALOUD', style: AppText.micro),
+          const SizedBox(height: 10),
+          Surface(
+            radius: 16,
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Read this aloud',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _script,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          height: 1.45,
-                        ),
-                  ),
-                ],
+              child: Text(
+                _script,
+                style: AppText.body.copyWith(fontSize: 14.5, height: 1.55),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 18),
           TextField(
             controller: _name,
             enabled: !_recording,
-            decoration: const InputDecoration(
-              labelText: 'Name',
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(labelText: 'Name'),
           ),
           const SizedBox(height: 12),
           if (_recording)
@@ -194,24 +182,46 @@ class _VoicesPageState extends State<VoicesPage> {
               child: const Text('Record sample'),
             ),
           if (_status != null) ...[
-            const SizedBox(height: 8),
-            Text(_status!),
+            const SizedBox(height: 10),
+            Text(_status!, style: AppText.sub.copyWith(fontSize: 12.5)),
           ],
-          const SizedBox(height: 16),
-          Text('Saved (${_voices.length}/${VoiceStore.maxVoices})',
-              style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 26),
+          Text(
+            'SAVED ${_voices.length}/${VoiceStore.maxVoices}',
+            style: AppText.micro,
+          ),
+          const SizedBox(height: 4),
           for (final v in _voices)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(v.name),
-              subtitle: const Text('Reference clip on this computer'),
-              trailing: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () async {
-                  await VoiceStore.remove(v.id);
-                  await _reload();
-                },
-              ),
+            Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(LucideIcons.mic,
+                          size: 15, color: AppColors.muted),
+                      const SizedBox(width: 13),
+                      Expanded(
+                        child: Text(
+                          v.name,
+                          style: AppText.label.copyWith(fontSize: 14),
+                        ),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(LucideIcons.trash2,
+                            size: 15, color: AppColors.faint),
+                        tooltip: 'Remove voice',
+                        onPressed: () async {
+                          await VoiceStore.remove(v.id);
+                          await _reload();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(),
+              ],
             ),
         ],
       ),

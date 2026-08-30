@@ -9,8 +9,12 @@ import '../mem0/mem0_client.dart';
 import '../mem0/mem0_store.dart';
 import '../stt/api_key_store.dart';
 import '../stt/openai_refine.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'app_theme.dart';
+import 'circle_button.dart';
 import 'md_text.dart';
-import 'app_page.dart';
+import 'page_scaffold.dart';
 
 class MemoriesPage extends StatefulWidget {
   const MemoriesPage({
@@ -331,140 +335,210 @@ class _MemoriesPageState extends State<MemoriesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return AppPage(
-      appBar: AppBar(
-        title: const Text('Memories'),
-        actions: [
-          IconButton(
-            tooltip: 'Send recaps to Mem0',
-            icon: const Icon(Icons.cloud_upload_outlined),
-            onPressed: _sending ? null : () => _pushRecaps(force: true),
+    return PageScaffold(
+      title: 'Memories',
+      caption: _ready && _mem0Key.isEmpty
+          ? 'Add a Mem0 key in Settings to sync recaps. Clean still works locally.'
+          : null,
+      actions: [
+        CircleIconButton(
+          icon: LucideIcons.arrowUp,
+          iconSize: 15,
+          onTap: _sending ? null : () => _pushRecaps(force: true),
+          tooltip: 'Send recaps to Mem0',
+        ),
+        if (_turns.isNotEmpty) ...[
+          const SizedBox(width: 8),
+          CircleIconButton(
+            icon: LucideIcons.trash2,
+            iconSize: 15,
+            onTap: _sending ? null : _clear,
+            tooltip: 'Clear chat',
           ),
-          if (_turns.isNotEmpty)
-            IconButton(
-              tooltip: 'Clear chat',
-              icon: const Icon(Icons.delete_outline),
-              onPressed: _sending ? null : _clear,
-            ),
         ],
-      ),
-      body: Column(
-        children: [
-          if (_ready && _mem0Key.isEmpty)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Text(
-                'Add a Mem0 hobby key in Settings. Clean still works locally.',
-              ),
-            ),
-          Expanded(
-            child: !_ready
-                ? const Center(child: CircularProgressIndicator())
-                : _turns.isEmpty
-                    ? const Center(
-                        child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text(
-                            'Ask about people, decisions, or follow-ups. '
-                            'One search per send. Answers cite journal days you can open.',
-                            textAlign: TextAlign.center,
+      ],
+      body: !_ready
+          ? const Center(child: CircularProgressIndicator())
+          : _turns.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 40),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 64,
+                          height: 64,
+                          decoration: BoxDecoration(
+                            color: const Color(0x0FFFFFFF),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: AppColors.line),
+                          ),
+                          child: const Icon(
+                            LucideIcons.sparkles,
+                            size: 22,
+                            color: AppColors.faint,
                           ),
                         ),
-                      )
-                    : ListView.builder(
-                        controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                        itemCount: _turns.length,
-                        itemBuilder: (context, i) {
-                          final t = _turns[i];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: ConstrainedBox(
-                                    constraints:
-                                        const BoxConstraints(maxWidth: 520),
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: Theme.of(context)
-                                            .colorScheme
-                                            .primaryContainer,
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(12),
-                                        child: Text(t.question),
-                                      ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Ask your memories',
+                          style: AppText.title.copyWith(fontSize: 15),
+                        ),
+                        const SizedBox(height: 6),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 260),
+                          child: Text(
+                            'People, decisions, follow-ups. Answers cite the days they came from.',
+                            textAlign: TextAlign.center,
+                            style: AppText.sub.copyWith(fontSize: 12.5),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.fromLTRB(28, 12, 28, 12),
+                  itemCount: _turns.length,
+                  itemBuilder: (context, i) {
+                    final t = _turns[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 420),
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: AppColors.card,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: AppColors.line),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 10,
+                                  ),
+                                  child: Text(
+                                    t.question,
+                                    style: AppText.body.copyWith(
+                                      fontSize: 14,
                                     ),
                                   ),
                                 ),
-                                const SizedBox(height: 8),
-                                if (t.error != null)
-                                  Text(
-                                    t.error!,
-                                    style: TextStyle(
-                                      color:
-                                          Theme.of(context).colorScheme.error,
-                                    ),
-                                  )
-                                else if (t.answer == null)
-                                  const Padding(
-                                    padding: EdgeInsets.symmetric(vertical: 8),
-                                    child: LinearProgressIndicator(),
-                                  )
-                                else ...[
-                                  MdText(t.answer!),
-                                  if (t.dayKeys.isNotEmpty) ...[
-                                    const SizedBox(height: 8),
-                                    Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        for (final k in t.dayKeys)
-                                          ActionChip(
-                                            label: Text(_chipLabel(k)),
-                                            onPressed: () => _openDay(k),
-                                          ),
-                                      ],
-                                    ),
-                                  ],
-                                ],
-                              ],
+                              ),
                             ),
-                          );
-                        },
+                          ),
+                          const SizedBox(height: 12),
+                          if (t.error != null)
+                            Text(
+                              t.error!,
+                              style: AppText.sub.copyWith(
+                                color: AppColors.accentDeep,
+                              ),
+                            )
+                          else if (t.answer == null)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 8),
+                              child: LinearProgressIndicator(minHeight: 1),
+                            )
+                          else ...[
+                            DefaultTextStyle(
+                              style: AppText.body.copyWith(fontSize: 14.5),
+                              child: MdText(t.answer!),
+                            ),
+                            if (t.dayKeys.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final k in t.dayKeys)
+                                    ActionChip(
+                                      label: Text(_chipLabel(k)),
+                                      onPressed: () => _openDay(k),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ],
                       ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _input,
-                      enabled: _ready && !_sending,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      decoration: const InputDecoration(
-                        hintText: 'Ask your memories…',
-                        border: OutlineInputBorder(),
+                    );
+                  },
+                ),
+      bottom: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.card,
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(color: AppColors.lineStrong),
+            ),
+            padding: const EdgeInsets.fromLTRB(18, 5, 7, 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _input,
+                    enabled: _ready && !_sending,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _send(),
+                    style: AppText.body.copyWith(fontSize: 14.5),
+                    cursorColor: AppColors.ink,
+                    decoration: InputDecoration(
+                      hintText: 'Ask your memories',
+                      hintStyle: AppText.body.copyWith(
+                        fontSize: 14.5,
+                        color: AppColors.faint,
                       ),
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      filled: false,
+                      isDense: true,
+                      contentPadding:
+                          const EdgeInsets.symmetric(vertical: 13),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: (_ready && !_sending) ? _send : null,
-                    icon: const Icon(Icons.send),
+                ),
+                const SizedBox(width: 8),
+                Material(
+                  color: AppColors.accent,
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: (_ready && !_sending) ? _send : null,
+                    child: SizedBox(
+                      width: 38,
+                      height: 38,
+                      child: _sending
+                          ? const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(
+                              LucideIcons.arrowUp,
+                              size: 17,
+                              color: Colors.white,
+                            ),
+                    ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }

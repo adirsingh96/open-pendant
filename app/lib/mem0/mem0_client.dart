@@ -319,7 +319,7 @@ extension DayRecapMem0 on DayRecap {
             if (f.owner.isNotEmpty) f.owner,
             f.action,
             if (f.when.isNotEmpty) f.when,
-          ].join(' — ')}',
+          ].join(' · ')}',
         );
       }
     }
@@ -343,7 +343,7 @@ extension DayRecapMem0 on DayRecap {
             if (c.when.isNotEmpty) c.when,
             if (c.title.isNotEmpty) c.title,
             c.what,
-          ].join(' — ')}',
+          ].join(' · ')}',
         );
       }
     }

@@ -5,7 +5,8 @@ import '../ble/pendant_ble.dart';
 import '../db/models.dart';
 import '../stt/stt_pricing.dart';
 import '../stt/vad_cal.dart';
-import 'app_page.dart';
+import 'app_theme.dart';
+import 'page_scaffold.dart';
 
 class DeveloperLive extends ChangeNotifier {
   bool connected = false;
@@ -84,13 +85,13 @@ class DeveloperPage extends StatelessWidget {
         ? '  rail ${(mv / 1000).toStringAsFixed(2)} V'
         : '';
     if (s.usbPowered) {
-      return 'Power: USB$mvLabel  (SoC only when unplugged — charger looks like a full cell)';
+      return 'Power: USB$mvLabel  (SoC only when unplugged, charger looks like a full cell)';
     }
     final pct = s.batteryPct;
     if (pct == null || mv == null) {
       return 'Battery: not seen';
     }
-    final warn = pct <= 20 ? '  — charge soon' : '';
+    final warn = pct <= 20 ? ', charge soon' : '';
     return 'Battery: ~$pct%  (${(mv / 1000).toStringAsFixed(2)} V)$warn';
   }
 
@@ -101,25 +102,29 @@ class DeveloperPage extends StatelessWidget {
       builder: (context, _) {
         final s = live.dbg;
         final imuLabel = !live.connected
-            ? '—'
+            ? 'n/a'
             : (s == null)
                 ? 'waiting (flash IMU firmware if this stays empty)'
                 : s.imuSleep
                     ? 'SLEEP'
                     : 'AWAKE';
         final clock = DateFormat.Hms();
-        return AppPage(
-          appBar: AppBar(title: const Text('Developer')),
+        return PageScaffold(
+          title: 'Developer',
           body: ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(28, 12, 28, 28),
             children: [
+              Text('SPEND', style: AppText.micro),
+              const SizedBox(height: 6),
               Text(
                 'STT + cleanup ${SttPricing.formatUsd(live.totalCostUsd)}  ·  '
                 '${live.totalBilledS.toStringAsFixed(1)}s billed'
                 '${(live.totalInTok + live.totalOutTok) > 0 ? '  ·  ${live.totalInTok} in / ${live.totalOutTok} out tok' : ''}',
-                style: Theme.of(context).textTheme.titleSmall,
+                style: AppText.body.copyWith(fontSize: 13.5),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
+              Text('LINK', style: AppText.micro),
+              const SizedBox(height: 6),
               Text('Link: ${live.connected ? 'connected' : 'down'}'),
               Text('Mode: ${live.armed ? 'armed (notify on)' : 'idle'}'),
               Text('STT queue: ${live.sttQueue}'),
@@ -141,10 +146,9 @@ class DeveloperPage extends StatelessWidget {
                   'Mic level: ${s.volume}  (info only; host VAD filters noise)',
                 ),
               ],
-              const SizedBox(height: 8),
-              Text('Button (D10)',
-                  style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 4),
+              const SizedBox(height: 16),
+              Text('BUTTON (D10)', style: AppText.micro),
+              const SizedBox(height: 6),
               const Text(
                 'Click starts or ends a meeting (red). Hold ~0.7s for a note (blue). '
                 'COM to GND, NO to pin 10. Serial: BTN single / long-down / long-up.',
@@ -168,14 +172,14 @@ class DeveloperPage extends StatelessWidget {
                 '(no OpenAI if quiet). Move and talk → next chunk. '
                 'Lines below are raw STT plus cleaned text, live as chunks finish.',
               ),
-              const SizedBox(height: 16),
-              Text('Time range', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 18),
+              Text('TIME RANGE', style: AppText.micro),
               const SizedBox(height: 8),
               rangeBar,
-              const SizedBox(height: 16),
+              const SizedBox(height: 18),
               Text(
-                'Live transcript (${live.segments.length} lines)',
-                style: Theme.of(context).textTheme.titleSmall,
+                'LIVE TRANSCRIPT (${live.segments.length})',
+                style: AppText.micro,
               ),
               const SizedBox(height: 8),
               if (live.segments.isEmpty)

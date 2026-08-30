@@ -40,4 +40,22 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
   end
+
+  # The sherpa_onnx_ios pod's vendored xcframework is named "sherpa-onnx.xcframework"
+  # but the binary product inside it is actually "SherpaOnnxC", so CocoaPods emits a
+  # linker flag for a framework name that doesn't exist. Patch the generated xcconfig
+  # files to link against the real product name instead.
+  pods_runner_dir = File.join(__dir__, 'Pods', 'Target Support Files', 'Pods-Runner')
+  Dir.glob(File.join(pods_runner_dir, '*.xcconfig')).each do |xcconfig_path|
+    contents = File.read(xcconfig_path)
+    fixed = contents.gsub('-framework "sherpa-onnx"', '-framework "SherpaOnnxC"')
+    File.write(xcconfig_path, fixed) if fixed != contents
+  end
+
+  frameworks_script_path = File.join(pods_runner_dir, 'Pods-Runner-frameworks.sh')
+  if File.exist?(frameworks_script_path)
+    contents = File.read(frameworks_script_path)
+    fixed = contents.gsub('sherpa_onnx_ios/sherpa-onnx.framework', 'sherpa_onnx_ios/SherpaOnnxC.framework')
+    File.write(frameworks_script_path, fixed) if fixed != contents
+  end
 end

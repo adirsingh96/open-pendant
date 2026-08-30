@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
 import '../db/models.dart';
 import '../stt/stt_pricing.dart';
-import 'app_page.dart';
+import 'circle_button.dart';
+import 'page_scaffold.dart';
 
 class ClipPage extends StatefulWidget {
   const ClipPage({
@@ -74,7 +77,8 @@ class ClipPage extends StatefulWidget {
     }
     const hues = [0.45, 0.12, 0.62, 0.08, 0.78, 0.32];
     final h = hues[n.hashCode.abs() % hues.length];
-    return HSVColor.fromAHSV(1, h * 360, 0.18, 0.94).toColor();
+    // Dark canvas: keep tints deep and desaturated so light text reads.
+    return HSVColor.fromAHSV(1, h * 360, 0.30, 0.17).toColor();
   }
 
   @override
@@ -171,28 +175,27 @@ class _ClipPageState extends State<ClipPage> {
     final engine = hasCompare
         ? '${journalEngine.isEmpty ? 'Journal' : journalEngine} vs ${altEngine.isEmpty ? 'Sarvam' : altEngine}'
         : journalEngine;
-    return AppPage(
-      appBar: AppBar(
-        title: Text(title),
-        actions: [
-          IconButton(
-            tooltip: 'Copy',
-            icon: const Icon(Icons.copy),
-            onPressed: copyBody.isEmpty
-                ? null
-                : () async {
-                    await Clipboard.setData(ClipboardData(text: copyBody));
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Copied conversation')),
-                      );
-                    }
-                  },
-          ),
-        ],
-      ),
+    return PageScaffold(
+      title: title,
+      actions: [
+        CircleIconButton(
+          icon: LucideIcons.copy,
+          iconSize: 15,
+          tooltip: 'Copy',
+          onTap: copyBody.isEmpty
+              ? null
+              : () async {
+                  await Clipboard.setData(ClipboardData(text: copyBody));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Copied conversation')),
+                    );
+                  }
+                },
+        ),
+      ],
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+        padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
         children: [
           if (widget.header != null) ...[
             widget.header!,

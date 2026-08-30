@@ -46,7 +46,7 @@ class SceneGroup {
     if (b.difference(a) < const Duration(minutes: 1)) {
       return start;
     }
-    return '$start–${clock(b)}';
+    return '$start to ${clock(b)}';
   }
 
   static bool isDisplaySpeaker(String w) {

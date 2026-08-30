@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../audio/speech_vad.dart';
 import '../ble/pendant_ble.dart';
 import '../stt/vad_cal.dart';
-import 'app_page.dart';
+import 'app_theme.dart';
+import 'liquid_glass.dart';
+import 'page_scaffold.dart';
 
 class CalibratePage extends StatefulWidget {
   const CalibratePage({
@@ -118,44 +120,30 @@ class _CalibratePageState extends State<CalibratePage> {
 
   @override
   Widget build(BuildContext context) {
-    return AppPage(
-      appBar: AppBar(title: const Text('Calibrate mic')),
+    return PageScaffold(
+      title: 'Calibrate mic',
+      caption:
+          'Wear the pendant the way you normally will and speak at your '
+          'usual volume. This sets a personal threshold so quiet talk is '
+          'not skipped.',
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(28, 12, 28, 28),
         children: [
-          const Text(
-            'Wear the pendant on your neck the way you normally will. '
-            'Speak at your usual volume. We measure how loud your voice '
-            'is at the mic and set a personal speech threshold so quiet '
-            'talk is not skipped.',
-          ),
-          const SizedBox(height: 12),
-          Text(VadCal.statusLine(),
-              style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 12),
-          Card(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          Text(VadCal.statusLine().toUpperCase(), style: AppText.micro),
+          const SizedBox(height: 14),
+          Text('READ THIS ALOUD', style: AppText.micro),
+          const SizedBox(height: 10),
+          Surface(
+            radius: 16,
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Read this aloud',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _script,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          height: 1.45,
-                        ),
-                  ),
-                ],
+              child: Text(
+                _script,
+                style: AppText.body.copyWith(fontSize: 14.5, height: 1.55),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 18),
           if (_recording)
             FilledButton(
               onPressed: _stop,
@@ -166,14 +154,14 @@ class _CalibratePageState extends State<CalibratePage> {
               onPressed: _start,
               child: const Text('Start calibration'),
             ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           TextButton(
             onPressed: _recording ? null : _reset,
             child: const Text('Reset to default'),
           ),
           if (_status != null) ...[
             const SizedBox(height: 8),
-            Text(_status!),
+            Text(_status!, style: AppText.sub.copyWith(fontSize: 12.5)),
           ],
         ],
       ),

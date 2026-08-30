@@ -417,6 +417,11 @@ CREATE TABLE memory_chats (
   }
 
   Future<void> _upgradeNotesMeetingId(DatabaseExecutor db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(notes)');
+    final hasMeetingId = cols.any((c) => c['name'] == 'meeting_id');
+    if (hasMeetingId) {
+      return;
+    }
     try {
       await db.execute('ALTER TABLE notes ADD COLUMN meeting_id TEXT');
     } catch (_) {}

@@ -5,7 +5,10 @@ import '../db/meeting.dart';
 import '../db/models.dart';
 import '../stt/api_key_store.dart';
 import '../stt/openai_refine.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
 import 'app_theme.dart';
+import 'circle_button.dart';
 import 'liquid_glass.dart';
 import 'mesh_backdrop.dart';
 import 'md_text.dart';
@@ -67,7 +70,8 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
     final day = DateFormat.MMMd().format(start);
     final clock = DateFormat.jm().format(start);
     final when = _isToday(start) ? 'Today' : day;
-    return '$when · $clock · $mins min';
+    final length = mins < 1 ? 'under a minute' : '$mins min';
+    return '$when · $clock · $length';
   }
 
   bool _isToday(DateTime t) {
@@ -159,82 +163,103 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
         const MeshBackdrop(),
         Scaffold(
           backgroundColor: Colors.transparent,
-          appBar: AppBar(
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-              onPressed: () => Navigator.pop(context),
-            ),
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _title,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.3,
-                  ),
-                ),
-                Text(
-                  _meta,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w400,
-                    color: AppColors.muted,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          body: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: _Tabs(
-                  value: _tab,
-                  onChanged: (v) => setState(() => _tab = v),
-                ),
-              ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          body: SafeArea(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 560),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (_tab == 'overview') _overview(),
-                    if (_tab == 'transcript') ...[
-                      TextField(
-                        onChanged: (v) => setState(() {}),
-                        controller: _searchCtl,
-                        decoration: InputDecoration(
-                          hintText: 'Search transcript',
-                          prefixIcon: const Icon(Icons.search, size: 20),
-                          filled: true,
-                          fillColor: AppColors.mint,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: AppColors.line),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                      child: Row(
+                        children: [
+                          CircleIconButton(
+                            icon: LucideIcons.arrowLeft,
+                            iconSize: 16,
+                            onTap: () => Navigator.pop(context),
+                            tooltip: 'Back',
                           ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: AppColors.line),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.headline.copyWith(
+                              fontSize: 25,
+                              height: 1.15,
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Icon(
+                                LucideIcons.clock,
+                                size: 13,
+                                color: AppColors.faint,
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                _meta,
+                                style: AppText.sub.copyWith(fontSize: 12.5),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 16),
-                      TranscriptThread(
-                        segments: _filteredSegs,
-                        empty: 'No speech in this meeting yet.',
+                    ),
+                    const SizedBox(height: 16),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: _Tabs(
+                        value: _tab,
+                        onChanged: (v) => setState(() => _tab = v),
                       ),
-                    ],
-                    if (_tab == 'tasks') _tasks(),
-                    if (_answer != null && _tab != 'tasks') ...[
-                      const SizedBox(height: 12),
-                      _answerCard(),
-                    ],
+                    ),
+                    Expanded(
+                      child: ListView(
+                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                        children: [
+                          if (_tab == 'overview') _overview(),
+                          if (_tab == 'transcript') ...[
+                            TextField(
+                              onChanged: (v) => setState(() {}),
+                              controller: _searchCtl,
+                              decoration: const InputDecoration(
+                                hintText: 'Search transcript',
+                                prefixIcon: Icon(
+                                  LucideIcons.search,
+                                  size: 17,
+                                  color: AppColors.muted,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 18),
+                            TranscriptThread(
+                              segments: _filteredSegs,
+                              empty: 'No speech in this meeting yet.',
+                            ),
+                          ],
+                          if (_tab == 'tasks') _tasks(),
+                          if (_answer != null && _tab != 'tasks') ...[
+                            const SizedBox(height: 12),
+                            _answerCard(),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (_tab != 'tasks') _askBar(),
                   ],
                 ),
               ),
-              if (_tab != 'tasks') _askBar(),
-            ],
+            ),
           ),
         ),
       ],
@@ -312,21 +337,13 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
             ),
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 14),
         Align(
           alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: _recapping ? null : _recap,
-            icon: _recapping
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.auto_fix_high, size: 18),
-            label: Text(
-              recap == null ? 'Generate recap' : 'Refresh recap',
-            ),
+          child: _GradientPillButton(
+            label: recap == null ? 'Generate recap' : 'Refresh recap',
+            busy: _recapping,
+            onTap: _recapping ? null : _recap,
           ),
         ),
         const SizedBox(height: 8),
@@ -442,38 +459,130 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: LiquidGlass(
-          radius: 28,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 6, 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _ask,
-                    style: const TextStyle(color: AppColors.ink),
-                    cursorColor: AppColors.ink,
-                    decoration: const InputDecoration(
-                      hintText: 'Ask about this meeting…',
-                      hintStyle: TextStyle(color: AppColors.muted),
-                      border: InputBorder.none,
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.card,
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: AppColors.lineStrong),
+          ),
+          padding: const EdgeInsets.fromLTRB(18, 5, 7, 5),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _ask,
+                  style: AppText.body.copyWith(fontSize: 14.5),
+                  cursorColor: AppColors.ink,
+                  decoration: InputDecoration(
+                    hintText: 'Ask about this meeting…',
+                    hintStyle: AppText.body.copyWith(
+                      fontSize: 14.5,
+                      color: AppColors.faint,
                     ),
-                    onSubmitted: (_) => _askMeeting(),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    filled: false,
+                    isDense: true,
+                    contentPadding:
+                        const EdgeInsets.symmetric(vertical: 13),
+                  ),
+                  onSubmitted: (_) => _askMeeting(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Material(
+                color: AppColors.accent,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _asking ? null : _askMeeting,
+                  child: SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: _asking
+                        ? const Padding(
+                            padding: EdgeInsets.all(10),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(
+                            LucideIcons.arrowUp,
+                            size: 17,
+                            color: Colors.white,
+                          ),
                   ),
                 ),
-                IconButton(
-                  onPressed: _asking ? null : _askMeeting,
-                  icon: _asking
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: AppColors.ink,
-                          ),
-                        )
-                      : const Icon(Icons.arrow_upward, color: AppColors.ink),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// White pill with gradient icon + gradient text — the "AI action" button.
+class _GradientPillButton extends StatelessWidget {
+  const _GradientPillButton({
+    required this.label,
+    required this.onTap,
+    this.busy = false,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+  final bool busy;
+
+  static const _gradient = LinearGradient(
+    colors: [Color(0xFFFF4D00), Color(0xFFE0577B), Color(0xFF9E6BEF)],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: AppColors.lineStrong),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(22),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (busy)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  ShaderMask(
+                    blendMode: BlendMode.srcIn,
+                    shaderCallback: (r) => _gradient.createShader(r),
+                    child: const Icon(LucideIcons.sparkles,
+                        size: 14, color: Colors.white),
+                  ),
+                const SizedBox(width: 8),
+                ShaderMask(
+                  blendMode: BlendMode.srcIn,
+                  shaderCallback: (r) => _gradient.createShader(r),
+                  child: Text(
+                    busy ? 'Working…' : label,
+                    style: AppText.label.copyWith(
+                      fontSize: 13.5,
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -492,27 +601,36 @@ class _Tabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    Widget chip(String id, String label) {
+    Widget seg(String id, String label) {
       final on = value == id;
-      return Expanded(
+      return Padding(
+        padding: const EdgeInsets.only(right: 22),
         child: GestureDetector(
           onTap: () => onChanged(id),
-          child: LiquidGlass(
-            radius: 20,
-            prominent: on,
-            blur: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Center(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: on ? AppColors.rule : AppColors.muted,
-                  ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: AppText.label.copyWith(
+                  fontSize: 13.5,
+                  fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                  color: on ? AppColors.ink : AppColors.faint,
                 ),
               ),
-            ),
+              const SizedBox(height: 6),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOut,
+                width: on ? 18 : 0,
+                height: 2,
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  borderRadius: BorderRadius.circular(1),
+                ),
+              ),
+            ],
           ),
         ),
       );
@@ -520,11 +638,9 @@ class _Tabs extends StatelessWidget {
 
     return Row(
       children: [
-        chip('transcript', 'Transcript'),
-        const SizedBox(width: 8),
-        chip('overview', 'Overview'),
-        const SizedBox(width: 8),
-        chip('tasks', 'Tasks'),
+        seg('transcript', 'Transcript'),
+        seg('overview', 'Overview'),
+        seg('tasks', 'Tasks'),
       ],
     );
   }

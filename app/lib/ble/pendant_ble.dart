@@ -231,8 +231,8 @@ class PendantBle {
     await sub.cancel();
     if (found == null) {
       throw Exception(
-        'Did not find OpenPendant. It allows one BLE link — quit nRF Connect, '
-        'or tap Connect again if macOS still holds the last session.',
+        'Did not find your pendant. Make sure it is nearby and that no other '
+        'app is holding its Bluetooth link, then try again.',
       );
     }
     return found!;

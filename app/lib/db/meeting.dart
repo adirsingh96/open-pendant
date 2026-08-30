@@ -39,13 +39,13 @@ class MeetingRecord {
     final end = endedAt ?? now;
     final start = SceneGroup.clock(a);
     if (end == null) {
-      return '$start–now';
+      return '$start to now';
     }
     final b = end.toLocal();
     if (b.difference(a) < const Duration(minutes: 1)) {
       return start;
     }
-    return '$start–${SceneGroup.clock(b)}';
+    return '$start to ${SceneGroup.clock(b)}';
   }
 
   List<String> get displaySpeakers {
