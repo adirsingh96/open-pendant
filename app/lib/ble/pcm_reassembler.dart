@@ -67,4 +67,15 @@ class PcmReassembler {
     lastComplete = complete.last.bytes;
     pcmByteLength = pcm.length;
   }
+
+  void addRaw(List<int> pcm) {
+    if (pcm.isEmpty) {
+      return;
+    }
+    final seq = ((_lastSeq ?? -1) + 1) & 0xffff;
+    complete.add(PcmChunk(seq: seq, bytes: List<int>.from(pcm)));
+    lastComplete = complete.last.bytes;
+    pcmByteLength += lastComplete.length;
+    _lastSeq = seq;
+  }
 }

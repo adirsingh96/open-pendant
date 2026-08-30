@@ -28,6 +28,8 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenPendant records with this Mac’s microphone when the necklace is not connected.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>OpenPendant uses Bluetooth to receive audio from the necklace.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>

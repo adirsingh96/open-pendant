@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../db/models.dart';
 import '../stt/stt_pricing.dart';
+import 'app_page.dart';
 
 class ClipPage extends StatefulWidget {
   const ClipPage({
@@ -170,7 +171,7 @@ class _ClipPageState extends State<ClipPage> {
     final engine = hasCompare
         ? '${journalEngine.isEmpty ? 'Journal' : journalEngine} vs ${altEngine.isEmpty ? 'Sarvam' : altEngine}'
         : journalEngine;
-    return Scaffold(
+    return AppPage(
       appBar: AppBar(
         title: Text(title),
         actions: [
@@ -271,7 +272,11 @@ class _ClipPageState extends State<ClipPage> {
                 if (stacked) {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [openaiCol, const SizedBox(height: 16), saarasCol],
+                    children: [
+                      openaiCol,
+                      const SizedBox(height: 16),
+                      saarasCol
+                    ],
                   );
                 }
                 return Row(
@@ -285,7 +290,9 @@ class _ClipPageState extends State<ClipPage> {
               },
             )
           else
-            for (var i = 0; i < (_view == 'alt' ? altVisible : visible).length; i++)
+            for (var i = 0;
+                i < (_view == 'alt' ? altVisible : visible).length;
+                i++)
               _Turn(
                 segment: (_view == 'alt' ? altVisible : visible)[i],
                 clock: clock,
@@ -359,7 +366,10 @@ class _Turn extends StatelessWidget {
                               : () => _rename(context, who),
                           child: Text(
                             who,
-                            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelMedium
+                                ?.copyWith(
                                   fontWeight: FontWeight.w600,
                                 ),
                           ),

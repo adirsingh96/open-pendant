@@ -5,6 +5,7 @@ import '../ble/pendant_ble.dart';
 import '../db/models.dart';
 import '../stt/stt_pricing.dart';
 import '../stt/vad_cal.dart';
+import 'app_page.dart';
 
 class DeveloperLive extends ChangeNotifier {
   bool connected = false;
@@ -107,7 +108,7 @@ class DeveloperPage extends StatelessWidget {
                     ? 'SLEEP'
                     : 'AWAKE';
         final clock = DateFormat.Hms();
-        return Scaffold(
+        return AppPage(
           appBar: AppBar(title: const Text('Developer')),
           body: ListView(
             padding: const EdgeInsets.all(16),
@@ -134,13 +135,15 @@ class DeveloperPage extends StatelessWidget {
                 Text(
                   'IMU read: ${s.imuFetchOk ? 'ok' : 'fail (still meter stays 0)'}',
                 ),
-                Text('Still meter: ${s.stillHits}/10  (10 still polls → sleep)'),
+                Text(
+                    'Still meter: ${s.stillHits}/10  (10 still polls → sleep)'),
                 Text(
                   'Mic level: ${s.volume}  (info only; host VAD filters noise)',
                 ),
               ],
               const SizedBox(height: 8),
-              Text('Button (D10)', style: Theme.of(context).textTheme.titleSmall),
+              Text('Button (D10)',
+                  style: Theme.of(context).textTheme.titleSmall),
               const SizedBox(height: 4),
               const Text(
                 'Click starts or ends a meeting (red). Hold ~0.7s for a note (blue). '

@@ -22,6 +22,7 @@ dependencies:
   googleapis_auth: ^2.3.3
   url_launcher: ^6.3.2
   sherpa_onnx: ^1.13.6
+  record: ^7.1.1
 
 dev_dependencies:
   flutter_test:

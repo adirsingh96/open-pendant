@@ -10,6 +10,7 @@ import '../mem0/mem0_store.dart';
 import '../stt/api_key_store.dart';
 import '../stt/openai_refine.dart';
 import 'md_text.dart';
+import 'app_page.dart';
 
 class MemoriesPage extends StatefulWidget {
   const MemoriesPage({
@@ -216,7 +217,8 @@ class _MemoriesPageState extends State<MemoriesPage> {
     }
     if (openaiKey.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Add an OpenAI API key in Settings first.')),
+        const SnackBar(
+            content: Text('Add an OpenAI API key in Settings first.')),
       );
       return;
     }
@@ -329,7 +331,7 @@ class _MemoriesPageState extends State<MemoriesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AppPage(
       appBar: AppBar(
         title: const Text('Memories'),
         actions: [
@@ -404,7 +406,8 @@ class _MemoriesPageState extends State<MemoriesPage> {
                                   Text(
                                     t.error!,
                                     style: TextStyle(
-                                      color: Theme.of(context).colorScheme.error,
+                                      color:
+                                          Theme.of(context).colorScheme.error,
                                     ),
                                   )
                                 else if (t.answer == null)

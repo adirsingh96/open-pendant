@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'macos/sandbox_migrate.dart';
+import 'ui/app_theme.dart';
 import 'ui/home_page.dart';
 
 Future<void> main() async {
@@ -16,10 +17,7 @@ class OpenPendantApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-        useMaterial3: true,
-      ),
+      theme: openPendantTheme(),
       home: const HomePage(),
     );
   }

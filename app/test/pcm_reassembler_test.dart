@@ -13,6 +13,14 @@ void main() {
     expect(r.seqGaps, 0);
   });
 
+  test('addRaw appends host-mic PCM', () {
+    final r = PcmReassembler();
+    r.addRaw([1, 2]);
+    r.addRaw([3, 4]);
+    expect(r.pcmBytes(), [1, 2, 3, 4]);
+    expect(r.pcmByteLength, 4);
+  });
+
   test('replaceWith keeps a PCM prefix', () {
     final r = PcmReassembler();
     r.addNotify([1, 0, 0, 1, 1, 2, 3, 4, 5, 6]);

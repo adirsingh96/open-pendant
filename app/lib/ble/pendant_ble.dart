@@ -132,11 +132,44 @@ class PendantBle {
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<List<int>>? _statusSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
+  StreamSubscription<BluetoothAdapterState>? _adapterSub;
   final PcmReassembler reassembler = PcmReassembler();
   void Function()? onConnectionLost;
   void Function(PendantStatus status)? onStatus;
   PendantStatus? lastStatus;
   bool _intentionalDisconnect = false;
+
+  /// Starts CoreBluetooth so the first Connect tap is not racing adapter init.
+  void warmup() {
+    _adapterSub ??= FlutterBluePlus.adapterState.listen((_) {});
+  }
+
+  Future<void> waitForAdapter({
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    warmup();
+    if (FlutterBluePlus.adapterStateNow == BluetoothAdapterState.on) {
+      return;
+    }
+    try {
+      await FlutterBluePlus.adapterState
+          .firstWhere((s) => s == BluetoothAdapterState.on)
+          .timeout(timeout);
+    } on TimeoutException {
+      switch (FlutterBluePlus.adapterStateNow) {
+        case BluetoothAdapterState.off:
+          throw Exception('Turn Bluetooth on, then tap Connect pendant.');
+        case BluetoothAdapterState.unauthorized:
+          throw Exception(
+            'Allow Bluetooth for OpenPendant, then tap Connect pendant.',
+          );
+        default:
+          throw Exception(
+            'Bluetooth is still starting. Tap Connect pendant again.',
+          );
+      }
+    }
+  }
 
   Future<BluetoothDevice?> findExisting() async {
     bool match(BluetoothDevice d) =>
@@ -164,6 +197,7 @@ class PendantBle {
   }
 
   Future<BluetoothDevice> scan({Duration timeout = const Duration(seconds: 20)}) async {
+    await waitForAdapter();
     final existing = await findExisting();
     if (existing != null) {
       return existing;
@@ -183,7 +217,16 @@ class PendantBle {
         }
       }
     });
-    await FlutterBluePlus.startScan(timeout: timeout);
+    try {
+      await FlutterBluePlus.startScan(timeout: timeout);
+    } catch (e) {
+      if (!_adapterNotReady(e)) {
+        rethrow;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await waitForAdapter();
+      await FlutterBluePlus.startScan(timeout: timeout);
+    }
     await FlutterBluePlus.isScanning.where((v) => v == false).first;
     await sub.cancel();
     if (found == null) {
@@ -195,7 +238,15 @@ class PendantBle {
     return found!;
   }
 
+  static bool _adapterNotReady(Object e) {
+    final s = e.toString().toLowerCase();
+    return s.contains('bluetooth must be turned on') ||
+        s.contains('cbmanagerstate') ||
+        s.contains('adapter is off');
+  }
+
   Future<void> connect(BluetoothDevice d) async {
+    await waitForAdapter();
     _intentionalDisconnect = false;
     device = d;
     await _connSub?.cancel();

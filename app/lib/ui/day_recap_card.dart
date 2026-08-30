@@ -119,7 +119,8 @@ class DayRecapCard extends StatelessWidget {
               ],
               if (recap.openLoops.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                Text('Open loops', style: Theme.of(context).textTheme.titleSmall),
+                Text('Open loops',
+                    style: Theme.of(context).textTheme.titleSmall),
                 for (final o in recap.openLoops) Text('• $o'),
               ],
               if (recap.noise.isNotEmpty) ...[

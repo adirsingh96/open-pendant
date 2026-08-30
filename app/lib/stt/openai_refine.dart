@@ -66,10 +66,14 @@ class OpenAiRefine {
     }
     final user = StringBuffer()
       ..write(priorBlock)
-      ..write('Clean these STT turns. Return JSON {"turns":[{"i":0,"speaker":"A","text":"..."}]}.\n')
-      ..write('Rules: drop noise, music, filler, and nonsense. Light-edit punctuation and ')
-      ..write('Hindi in Devanagari / English in Latin. Never Urdu/Arabic script. ')
-      ..write('Do not translate. Do not invent. Keep speakers. Empty text means drop.\n')
+      ..write(
+          'Clean these STT turns. Return JSON {"turns":[{"i":0,"speaker":"A","text":"..."}]}.\n')
+      ..write(
+          'Rules: drop noise, music, filler, and nonsense. Light-edit punctuation and ')
+      ..write(
+          'Hindi in Devanagari / English in Latin. Never Urdu/Arabic script. ')
+      ..write(
+          'Do not translate. Do not invent. Keep speakers. Empty text means drop.\n')
       ..write(jsonEncode({'turns': turns}));
 
     final req = await _client
@@ -181,9 +185,8 @@ class OpenAiRefine {
       const batch = 80;
       final maps = <Map<String, dynamic>>[];
       for (var start = 0; start < segments.length; start += batch) {
-        final end = start + batch > segments.length
-            ? segments.length
-            : start + batch;
+        final end =
+            start + batch > segments.length ? segments.length : start + batch;
         final slice = segments.sublist(start, end);
         final rows = <Map<String, Object?>>[];
         for (var i = 0; i < slice.length; i++) {
@@ -284,7 +287,8 @@ class OpenAiRefine {
     return maps;
   }
 
-  Future<({Map<String, dynamic> json, int inputTokens, int outputTokens})> _chat({
+  Future<({Map<String, dynamic> json, int inputTokens, int outputTokens})>
+      _chat({
     required String apiKey,
     required String system,
     required String user,
@@ -361,8 +365,7 @@ class OpenAiRefine {
             'messages': [
               {
                 'role': 'system',
-                'content':
-                    'You answer questions from the wearer\'s journal recaps. '
+                'content': 'You answer questions from the wearer\'s journal recaps. '
                     'Stay on the question\'s topic. Same-day follow-ups about a '
                     'different project or tool must be omitted. If one line mixes '
                     'two workstreams, keep only the part that matches the question. '
@@ -378,8 +381,7 @@ class OpenAiRefine {
               },
               {
                 'role': 'user',
-                'content':
-                    'Question: $question\n'
+                'content': 'Question: $question\n'
                     'Use only facts about that subject. Ignore other projects '
                     'that happen to share the same calendar day.\n\n'
                     'Day recaps:\n${buf.toString()}'
@@ -391,6 +393,49 @@ class OpenAiRefine {
         .timeout(const Duration(seconds: 45));
     if (req.statusCode >= 400) {
       throw Exception('memory answer ${req.statusCode}: ${req.body}');
+    }
+    final body = jsonDecode(req.body) as Map<String, dynamic>;
+    final content = (body['choices'] as List).first as Map<String, dynamic>;
+    final msg = content['message'] as Map<String, dynamic>;
+    return (msg['content'] as String? ?? '').trim();
+  }
+
+  Future<String> answerAboutMeeting({
+    required String apiKey,
+    required String question,
+    required String recap,
+    required String transcript,
+  }) async {
+    final req = await _client
+        .post(
+          Uri.parse(_url),
+          headers: {
+            'Authorization': 'Bearer $apiKey',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'model': refineModel,
+            'temperature': 0.2,
+            'messages': [
+              {
+                'role': 'system',
+                'content':
+                    'You answer questions about one meeting. Use only the recap '
+                        'and transcript. Mention speakers and clock times when they '
+                        'are in the source. Do not invent.',
+              },
+              {
+                'role': 'user',
+                'content':
+                    'Question: $question\n\nRecap:\n${recap.trim().isEmpty ? '(none)' : recap}\n\n'
+                        'Transcript:\n${transcript.trim().isEmpty ? '(none)' : transcript}',
+              },
+            ],
+          }),
+        )
+        .timeout(const Duration(seconds: 45));
+    if (req.statusCode >= 400) {
+      throw Exception('meeting answer ${req.statusCode}: ${req.body}');
     }
     final body = jsonDecode(req.body) as Map<String, dynamic>;
     final content = (body['choices'] as List).first as Map<String, dynamic>;

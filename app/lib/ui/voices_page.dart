@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../audio/wav_writer.dart';
 import '../ble/pendant_ble.dart';
 import '../stt/voice_store.dart';
+import 'app_page.dart';
 
 class VoicesPage extends StatefulWidget {
   const VoicesPage({
@@ -23,8 +24,7 @@ class VoicesPage extends StatefulWidget {
 }
 
 class _VoicesPageState extends State<VoicesPage> {
-  static const _script =
-      'Hello. This is my voice sample for OpenPendant. '
+  static const _script = 'Hello. This is my voice sample for OpenPendant. '
       'I am speaking clearly at a normal pace so you can tell who is talking later. '
       'The weather is fine today, and I am glad to record this. Thank you.';
 
@@ -68,12 +68,14 @@ class _VoicesPageState extends State<VoicesPage> {
       return;
     }
     if (_voices.length >= VoiceStore.maxVoices) {
-      setState(() => _status = 'Remove a voice first (max ${VoiceStore.maxVoices}).');
+      setState(() =>
+          _status = 'Remove a voice first (max ${VoiceStore.maxVoices}).');
       return;
     }
     final name = VoiceStore.sanitizeName(_name.text);
     if (name.isEmpty) {
-      setState(() => _status = 'Enter a name, then record 2–10 seconds of speech.');
+      setState(
+          () => _status = 'Enter a name, then record 2–10 seconds of speech.');
       return;
     }
     setState(() {
@@ -118,7 +120,8 @@ class _VoicesPageState extends State<VoicesPage> {
       widget.ble.reassembler.reset();
       final dur = pcm.length / 2 / 16000;
       if (dur < 2) {
-        setState(() => _status = 'Need at least 2 seconds (got ${dur.toStringAsFixed(1)}s).');
+        setState(() => _status =
+            'Need at least 2 seconds (got ${dur.toStringAsFixed(1)}s).');
         return;
       }
       var clip = pcm;
@@ -128,7 +131,8 @@ class _VoicesPageState extends State<VoicesPage> {
       await VoiceStore.add(name: _name.text, wavBytes: pcmToWav(pcm: clip));
       _name.clear();
       await _reload();
-      setState(() => _status = 'Saved. This clip is sent with each transcription.');
+      setState(
+          () => _status = 'Saved. This clip is sent with each transcription.');
     } catch (e) {
       setState(() => _status = '$e');
     }
@@ -136,7 +140,7 @@ class _VoicesPageState extends State<VoicesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AppPage(
       appBar: AppBar(title: const Text('Voices')),
       body: ListView(
         padding: const EdgeInsets.all(16),

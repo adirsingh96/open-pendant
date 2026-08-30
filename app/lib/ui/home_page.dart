@@ -14,6 +14,7 @@ import '../calendar/note_command.dart';
 import '../notes/note_prefs.dart';
 import '../audio/speech_vad.dart';
 import '../audio/wav_writer.dart';
+import '../audio/device_mic.dart';
 import '../ble/pendant_ble.dart';
 import '../db/clip_store.dart';
 import '../db/day_recap.dart';
@@ -35,6 +36,11 @@ import 'calibrate_page.dart';
 import 'developer_page.dart';
 import 'settings_page.dart';
 import 'voices_page.dart';
+import 'app_theme.dart';
+import 'meeting_detail_page.dart';
+import 'transcript_bubbles.dart';
+import 'liquid_glass.dart';
+import 'mesh_backdrop.dart';
 import '../stt/vad_cal.dart';
 import '../db/scene_group.dart';
 import '../mem0/mem0_client.dart';
@@ -64,12 +70,13 @@ class _HomePageState extends State<HomePage> {
   final _refine = OpenAiRefine();
   final _dev = DeveloperLive();
   final _search = TextEditingController();
-  final _noteDraft = TextEditingController();
 
   String _status = 'Disconnected. Force-quit nRF Connect first.';
   bool _busy = false;
   bool _connected = false;
   bool _armed = false;
+  bool _usingDeviceMic = false;
+  final _deviceMic = DeviceMic();
   bool _rotating = false;
   DateTime? _chunkStartedAt;
   DateTime? _lastSpeechAt;
@@ -91,9 +98,15 @@ class _HomePageState extends State<HomePage> {
   bool _commandNext = false;
   bool _noteHolding = false;
   bool _noteTempArm = false;
+  bool _noteUsingDeviceMic = false;
+  bool _noteStopping = false;
   int _noteFromByte = 0;
   int _btnSeqSeen = 0;
   bool _btnSeqPrimed = false;
+  int _tab = 0;
+  bool _showLive = false;
+  String _wearerName = '';
+  List<double> _levels = [];
   DateTime? _meetingStartedAt;
   Future<void>? _noteBegin;
   final _buttonNoteIds = <String>{};
@@ -111,6 +124,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _ble.onConnectionLost = _onConnectionLost;
     _ble.onStatus = _onPendantStatus;
+    _ble.warmup();
     VadCal.load().then((_) {
       if (mounted) {
         setState(() {});
@@ -139,9 +153,9 @@ class _HomePageState extends State<HomePage> {
     _armTick?.cancel();
     _lifecycle?.dispose();
     _search.dispose();
-    _noteDraft.dispose();
     _dev.dispose();
     _ble.disconnect();
+    unawaited(_deviceMic.stop());
     super.dispose();
   }
 
@@ -151,10 +165,17 @@ class _HomePageState extends State<HomePage> {
     }
     final wasSleep = _imuWasSleep;
     _imuWasSleep = s.imuSleep;
-    setState(() => _dbg = s);
+    setState(() {
+      _dbg = s;
+      final v = (s.volume / 3500).clamp(0.06, 1.0).toDouble();
+      _levels = [..._levels, v];
+      if (_levels.length > 36) {
+        _levels = _levels.sublist(_levels.length - 36);
+      }
+    });
     _syncButtonNote(s);
     _syncDev();
-    if (!_armed || _noteHolding) {
+    if (!_armed || _noteHolding || _usingDeviceMic) {
       return;
     }
     if (s.imuSleep && !wasSleep) {
@@ -197,22 +218,24 @@ class _HomePageState extends State<HomePage> {
       _noteHolding = false;
       return;
     }
-    if (!_connected) {
-      _noteHolding = false;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Connect the pendant to take a note.')),
-        );
-      }
-      return;
-    }
     try {
       if (!_armed) {
         _noteTempArm = true;
-        await _ble.startRecording(_onPcm);
+        _ble.reassembler.reset();
         _noteFromByte = 0;
+        if (_connected) {
+          _noteUsingDeviceMic = false;
+          await _ble.startRecording(_onPcm);
+        } else {
+          _noteUsingDeviceMic = true;
+          await _deviceMic.start(
+            pcm: _ble.reassembler,
+            onPacket: _onPcm,
+          );
+        }
       } else {
         _noteTempArm = false;
+        _noteUsingDeviceMic = false;
         var from = _ble.reassembler.pcmByteLength - _notePrerollBytes;
         if (from < 0) {
           from = 0;
@@ -223,11 +246,15 @@ class _HomePageState extends State<HomePage> {
         _noteFromByte = from;
       }
       if (mounted) {
-        setState(() => _status = 'Note… hold to talk, release to save');
+        setState(() => _status = 'Note… tap again to save');
       }
     } catch (e) {
       _noteHolding = false;
       _noteTempArm = false;
+      if (_noteUsingDeviceMic) {
+        await _deviceMic.stop();
+      }
+      _noteUsingDeviceMic = false;
       if (mounted) {
         setState(() => _status = '$e');
       }
@@ -253,10 +280,15 @@ class _HomePageState extends State<HomePage> {
     final slice = all.sublist(from);
     if (_noteTempArm) {
       try {
-        await _ble.stopRecording();
+        if (_noteUsingDeviceMic) {
+          await _deviceMic.stop();
+        } else {
+          await _ble.stopRecording();
+        }
       } catch (_) {}
       _ble.reassembler.reset();
       _noteTempArm = false;
+      _noteUsingDeviceMic = false;
     } else {
       _ble.reassembler.replaceWith(all.sublist(0, from));
       _bytes = _ble.reassembler.pcmByteLength;
@@ -338,6 +370,7 @@ class _HomePageState extends State<HomePage> {
       from: weekStart,
       to: DateTime(now.year, now.month, now.day, 23, 59, 59),
     );
+    final voices = await VoiceStore.list();
     if (!mounted) {
       return;
     }
@@ -350,6 +383,9 @@ class _HomePageState extends State<HomePage> {
       _totalBilledS = usage.billedS;
       _totalInTok = usage.inputTokens;
       _totalOutTok = usage.outputTokens;
+      _wearerName = voices.isEmpty
+          ? ''
+          : voices.first.name.trim().split(RegExp(r'\s+')).first;
     });
     _syncDev(force: true);
   }
@@ -402,23 +438,9 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  String _dayHeading() {
-    final day = _selectedDay;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final yesterday = today.subtract(const Duration(days: 1));
-    final full = DateFormat.yMMMMEEEEd().format(day);
-    if (_sameDay(day, today)) {
-      return '$full · Today';
-    }
-    if (_sameDay(day, yesterday)) {
-      return '$full · Yesterday';
-    }
-    return full;
-  }
-
   Future<void> _cleanMeeting(MeetingRecord meeting) async {
-    final segs = meeting.segments.where((s) => s.text.trim().isNotEmpty).toList();
+    final segs =
+        meeting.segments.where((s) => s.text.trim().isNotEmpty).toList();
     if (segs.isEmpty) {
       if (!mounted) {
         return;
@@ -434,7 +456,8 @@ class _HomePageState extends State<HomePage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Add an OpenAI API key in Settings first.')),
+        const SnackBar(
+            content: Text('Add an OpenAI API key in Settings first.')),
       );
       return;
     }
@@ -446,8 +469,7 @@ class _HomePageState extends State<HomePage> {
         apiKey: key,
         dayKey: meeting.id,
         dateLabel: 'Meeting ${DateFormat.MMMd().add_jm().format(start)}',
-        rangeLabel:
-            '${DateFormat.MMMd().add_jm().format(start)} – '
+        rangeLabel: '${DateFormat.MMMd().add_jm().format(start)} – '
             '${DateFormat.jm().format(end)} '
             '(only these recorded turns; do not invent later hours)',
         segments: segs,
@@ -578,7 +600,7 @@ class _HomePageState extends State<HomePage> {
       });
     } catch (e) {
       if (mounted) {
-        setState(() => _status = '$e');
+        setState(() => _status = _friendlyBleError(e));
       }
     } finally {
       if (mounted) {
@@ -589,6 +611,21 @@ class _HomePageState extends State<HomePage> {
 
   void _onConnectionLost() {
     if (!mounted || _autoReconnect) {
+      return;
+    }
+    if (_usingDeviceMic || _noteUsingDeviceMic) {
+      setState(() {
+        _connected = false;
+        _dbg = null;
+      });
+      return;
+    }
+    if (_noteHolding && !_armed) {
+      unawaited(_failPendantNote());
+      return;
+    }
+    if (_armed) {
+      unawaited(_failPendantMeeting());
       return;
     }
     final wasArmed = _armed;
@@ -605,6 +642,57 @@ class _HomePageState extends State<HomePage> {
       }
       await _beginAutoReconnect();
     });
+  }
+
+  Future<void> _failPendantNote() async {
+    _noteHolding = false;
+    await _noteBegin;
+    if (_noteTempArm) {
+      try {
+        await _ble.stopRecording();
+      } catch (_) {}
+      _ble.reassembler.reset();
+      _noteTempArm = false;
+    }
+    _noteUsingDeviceMic = false;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _connected = false;
+      _dbg = null;
+      _status = 'Pendant disconnected. Note stopped.';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 5),
+        content: Text(
+          'Pendant disconnected. Note stopped. Reconnect to talk from the necklace, or hold to talk on this device’s mic.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _failPendantMeeting() async {
+    _autoReconnect = false;
+    _resumeAfterReconnect = false;
+    await _disarm(flush: true, keepSession: false);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _connected = false;
+      _showLive = false;
+      _status = 'Pendant disconnected. Meeting stopped.';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 5),
+        content: Text(
+          'Pendant disconnected. Meeting stopped. Reconnect to record with the necklace, or start a new meeting on this device’s mic.',
+        ),
+      ),
+    );
   }
 
   Future<void> _beginAutoReconnect() async {
@@ -630,7 +718,8 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _connected = true;
           _busy = false;
-          _status = 'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
+          _status =
+              'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
         });
         if (resume) {
           await _arm(resumeSession: true);
@@ -651,7 +740,8 @@ class _HomePageState extends State<HomePage> {
     _autoReconnect = false;
     setState(() {
       _busy = false;
-      _status = 'Could not reconnect. Tap Reconnect when the pendant is nearby.';
+      _status =
+          'Could not reconnect. Tap Reconnect when the pendant is nearby.';
     });
   }
 
@@ -671,7 +761,8 @@ class _HomePageState extends State<HomePage> {
       }
       setState(() {
         _connected = true;
-        _status = 'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
+        _status =
+            'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
       });
     } catch (e) {
       if (mounted) {
@@ -685,13 +776,19 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _toggleMeeting() async {
-    if (_busy || !_connected) {
+    if (_busy) {
       return;
     }
     if (_armed) {
       await _disarm(flush: true, keepSession: false);
+      if (mounted) {
+        setState(() => _showLive = false);
+      }
     } else {
       await _arm(resumeSession: false);
+      if (mounted && _armed) {
+        setState(() => _showLive = true);
+      }
     }
   }
 
@@ -718,20 +815,41 @@ class _HomePageState extends State<HomePage> {
       _hadSpeechInChunk = false;
       _imuWasSleep = _dbg?.imuSleep ?? false;
       _bytes = 0;
-      await _ble.startRecording(_onPcm);
+      _usingDeviceMic = !_connected;
+      if (_usingDeviceMic) {
+        _ble.reassembler.reset();
+        await _deviceMic.start(
+          pcm: _ble.reassembler,
+          onPacket: _onPcm,
+        );
+      } else {
+        await _ble.startRecording(_onPcm);
+      }
       _armTick?.cancel();
-      _armTick = Timer.periodic(const Duration(milliseconds: 200), (_) => _onArmTick());
+      _armTick = Timer.periodic(
+          const Duration(milliseconds: 200), (_) => _onArmTick());
       setState(() => _armed = true);
       _refreshArmedStatus();
     } catch (e) {
-      setState(() => _status = '$e');
+      _usingDeviceMic = false;
+      await _deviceMic.stop();
+      if (!resumeSession && _sessionId != null) {
+        try {
+          await _store.endMeeting(_sessionId!);
+        } catch (_) {}
+        _sessionId = null;
+        _meetingStartedAt = null;
+      }
+      if (mounted) {
+        setState(() => _status = '$e');
+      }
     } finally {
       setState(() => _busy = false);
     }
   }
 
   void _onPcm() {
-    if (!mounted || !_armed) {
+    if (!mounted || (!_armed && !_noteHolding)) {
       return;
     }
     final last = _ble.reassembler.lastComplete;
@@ -741,6 +859,9 @@ class _HomePageState extends State<HomePage> {
       _hadSpeechInChunk = true;
     }
     setState(() => _bytes = _ble.reassembler.pcmByteLength);
+    if (_usingDeviceMic || _noteUsingDeviceMic) {
+      _pushLevelFromPcm(last);
+    }
     _syncDev();
     if (!_noteHolding && _ble.reassembler.pcmByteLength >= _maxChunkBytes) {
       Future.microtask(() => _rotateChunk());
@@ -755,13 +876,13 @@ class _HomePageState extends State<HomePage> {
     final quiet = (CursorPrefs.enabled || NotePrefs.enabled)
         ? _cursorQuietRotate
         : _quietRotate;
-    if (_hadSpeechInChunk &&
-        now.difference(_lastSpeechAt ?? now) >= quiet) {
+    if (_hadSpeechInChunk && now.difference(_lastSpeechAt ?? now) >= quiet) {
       Future.microtask(() => _rotateChunk());
       return;
     }
     final imuSleep = _dbg?.imuSleep ?? false;
-    if (!imuSleep &&
+    if (!_usingDeviceMic &&
+        !imuSleep &&
         _bytes > 0 &&
         now.difference(_lastPcmAt ?? now) >= _noPcmRotate) {
       Future.microtask(() => _rotateChunk());
@@ -769,13 +890,32 @@ class _HomePageState extends State<HomePage> {
     _refreshArmedStatus();
   }
 
+  void _pushLevelFromPcm(List<int> pcm) {
+    if (pcm.length < 4) {
+      return;
+    }
+    var sum = 0;
+    final n = pcm.length ~/ 2;
+    for (var i = 0; i + 1 < pcm.length; i += 2) {
+      var s = pcm[i] | (pcm[i + 1] << 8);
+      if (s > 32767) {
+        s -= 65536;
+      }
+      sum += s.abs();
+    }
+    final avg = n == 0 ? 0.0 : sum / n;
+    final v = (avg / 4000).clamp(0.06, 1.0).toDouble();
+    _levels = [..._levels, v];
+    if (_levels.length > 36) {
+      _levels = _levels.sublist(_levels.length - 36);
+    }
+  }
+
   void _refreshArmedStatus() {
     if (!mounted || !_armed) {
       return;
     }
-    final imu = _dbg == null
-        ? '…'
-        : (_dbg!.imuSleep ? 'Resting' : 'Listening');
+    final imu = _dbg == null ? '…' : (_dbg!.imuSleep ? 'Resting' : 'Listening');
     setState(() {
       _status =
           '${_wearerLabel()}${_dbg == null ? '' : ' · $imu'} · ${_sttEngineLabel()} · queue ${_sttQueue.length + (_sttBusy ? 1 : 0)}';
@@ -875,6 +1015,8 @@ class _HomePageState extends State<HomePage> {
         }
       }
       await _ble.stopRecording();
+      await _deviceMic.stop();
+      _usingDeviceMic = false;
       if (!keepSession) {
         if (_sessionId != null) {
           await _store.endMeeting(_sessionId!);
@@ -885,9 +1027,8 @@ class _HomePageState extends State<HomePage> {
       }
       if (mounted) {
         setState(() {
-          _status = keepSession
-              ? 'Chunk flushed. Reconnecting…'
-              : 'Meeting ended.';
+          _status =
+              keepSession ? 'Chunk flushed. Reconnecting…' : 'Meeting ended.';
         });
       }
     } catch (e) {
@@ -1016,7 +1157,8 @@ class _HomePageState extends State<HomePage> {
       await _store.upsertClip(clip.copyWith(status: 'error'));
       return;
     }
-    if ((needOpenAi && openaiKey.isEmpty) || (needSarvam && sarvamKey.isEmpty)) {
+    if ((needOpenAi && openaiKey.isEmpty) ||
+        (needSarvam && sarvamKey.isEmpty)) {
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
       final missing = [
@@ -1028,10 +1170,10 @@ class _HomePageState extends State<HomePage> {
     }
 
     final full = await File(wavPath).readAsBytes();
-    final pcm = full.length > 44 &&
-            String.fromCharCodes(full.sublist(0, 4)) == 'RIFF'
-        ? full.sublist(44)
-        : full;
+    final pcm =
+        full.length > 44 && String.fromCharCodes(full.sublist(0, 4)) == 'RIFF'
+            ? full.sublist(44)
+            : full;
     final speech = extractSpeech(
       pcm,
       energyFloor: VadGate.energyFloor,
@@ -1073,7 +1215,8 @@ class _HomePageState extends State<HomePage> {
     }
 
     final speechPath = p.join(p.dirname(wavPath), '${clip.id}_speech.wav');
-    await File(speechPath).writeAsBytes(pcmToWav(pcm: speech.speechPcm), flush: true);
+    await File(speechPath)
+        .writeAsBytes(pcmToWav(pcm: speech.speechPcm), flush: true);
     final wav = File(speechPath);
     try {
       TranscriptResult? openai;
@@ -1128,9 +1271,8 @@ class _HomePageState extends State<HomePage> {
 
       final openaiOk = openai != null && _sttHasText(openai);
       final saarasOk = saaras != null && _sttHasText(saaras);
-      final TranscriptResult? primary = openaiOk
-          ? openai
-          : (saarasOk ? saaras : openai ?? saaras);
+      final TranscriptResult? primary =
+          openaiOk ? openai : (saarasOk ? saaras : openai ?? saaras);
       if (primary == null || !_sttHasText(primary)) {
         if (buttonNote) {
           _buttonNoteIds.remove(clip.id);
@@ -1372,38 +1514,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<void> _addTypedNote() async {
-    final text = _noteDraft.text.trim();
-    if (text.isEmpty) {
-      return;
-    }
-    try {
-      await _store.insertNote(
-        SpokenNote(
-          id: const Uuid().v4(),
-          createdAt: DateTime.now().toUtc(),
-          text: text,
-          meetingId: _armed ? _sessionId : null,
-        ),
-      );
-      _noteDraft.clear();
-      await _reload();
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Note saved')),
-      );
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not save note: $e')),
-      );
-    }
-  }
-
   Future<void> _sleep() async {
     _autoReconnect = false;
     _resumeAfterReconnect = false;
@@ -1571,7 +1681,6 @@ class _HomePageState extends State<HomePage> {
     return DateFormat('MMM d, HH:mm').format(t);
   }
 
-
   Widget _rangeBar() {
     final now = DateTime.now();
     final hourStart = DateTime(now.year, now.month, now.day, now.hour);
@@ -1629,19 +1738,41 @@ class _HomePageState extends State<HomePage> {
     await _reload();
   }
 
-  Future<void> _openMeeting(MeetingRecord meeting, {bool developer = false}) async {
+  Future<void> _openMeeting(MeetingRecord meeting,
+      {bool developer = false}) async {
     if (!mounted) {
+      return;
+    }
+    if (developer) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ClipPage.range(
+            segments: meeting.segments,
+            clips: meeting.clips,
+            title: meeting.timeRangeLabel(now: DateTime.now()),
+            onRenameSpeaker: _renameSpeaker,
+            showDeveloper: true,
+            header: _meetingDetailHeader(meeting),
+          ),
+        ),
+      );
+      await _reload();
       return;
     }
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ClipPage.range(
-          segments: meeting.segments,
-          clips: meeting.clips,
-          title: meeting.timeRangeLabel(now: DateTime.now()),
-          onRenameSpeaker: _renameSpeaker,
-          showDeveloper: developer,
-          header: _meetingDetailHeader(meeting),
+        builder: (_) => MeetingDetailPage(
+          meeting: meeting,
+          onRecap: () => _cleanMeeting(meeting),
+          reload: () async {
+            await _reload();
+            for (final m in _meetings) {
+              if (m.id == meeting.id) {
+                return m;
+              }
+            }
+            return null;
+          },
         ),
       ),
     );
@@ -1697,299 +1828,871 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  String _greeting() {
+    final h = DateTime.now().hour;
+    final name = _wearerName.isEmpty ? '' : ', $_wearerName';
+    if (h < 12) {
+      return 'Good morning$name.';
+    }
+    if (h < 17) {
+      return 'Good afternoon$name.';
+    }
+    return 'Good evening$name.';
+  }
+
+  String _batteryLabel() {
+    final s = _dbg;
+    if (!_connected) {
+      return _busy ? 'Connecting…' : 'Connect';
+    }
+    if (s == null) {
+      return 'Connected';
+    }
+    if (s.usbPowered) {
+      return 'Connected · USB';
+    }
+    if (s.batteryPct != null) {
+      return 'Connected · ${s.batteryPct}%';
+    }
+    return 'Connected';
+  }
+
+  String get _hostMicLabel {
+    if (Platform.isIOS) {
+      return 'iPhone';
+    }
+    if (Platform.isMacOS) {
+      return 'Mac';
+    }
+    return 'phone';
+  }
+
+  MeetingRecord? get _currentMeeting {
+    final id = _sessionId;
+    if (id == null) {
+      return null;
+    }
+    for (final m in _meetings) {
+      if (m.id == id) {
+        return m;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _toggleVoiceNote() async {
+    if (_busy) {
+      return;
+    }
+    if (_noteHolding || _noteTempArm || _noteUsingDeviceMic) {
+      await _stopScreenNote();
+      return;
+    }
+    setState(() => _noteHolding = true);
+    _noteBegin = _beginButtonNote();
+    await _noteBegin;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _stopScreenNote() async {
+    if (_noteStopping) {
+      await _noteBegin;
+      return;
+    }
+    _noteStopping = true;
+    try {
+      await _noteBegin;
+      if (!_noteHolding && !_noteTempArm && !_noteUsingDeviceMic) {
+        return;
+      }
+      _noteHolding = false;
+      await _endButtonNote();
+    } finally {
+      _noteStopping = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _markMoment() async {
+    await _store.insertNote(
+      SpokenNote(
+        id: const Uuid().v4(),
+        createdAt: DateTime.now().toUtc(),
+        text: 'Marked moment',
+        meetingId: _sessionId,
+      ),
+    );
+    await _reload();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Moment marked')),
+      );
+    }
+  }
+
+  String _friendlyBleError(Object e) {
+    final s = e.toString();
+    if (s.contains('bluetooth must be turned on') ||
+        s.contains('CBManagerState')) {
+      return 'Turn Bluetooth on, then tap Connect pendant.';
+    }
+    if (s.contains('permission')) {
+      return 'Allow Bluetooth for OpenPendant, then tap Connect pendant.';
+    }
+    return s;
+  }
+
+  Future<void> _connectPendant() async {
+    if (_busy) {
+      return;
+    }
+    if (_connected) {
+      await _disconnectPendant();
+      return;
+    }
+    if (_ble.device != null) {
+      await _manualReconnect();
+    } else {
+      await _connect();
+    }
+  }
+
+  Future<void> _disconnectPendant() async {
+    _autoReconnect = false;
+    _resumeAfterReconnect = false;
+    if (_armed && !_usingDeviceMic) {
+      await _disarm(flush: true, keepSession: false);
+    }
+    await _ble.disconnect();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _connected = false;
+      _dbg = null;
+      if (!_usingDeviceMic) {
+        _armed = false;
+        _showLive = false;
+      }
+      _status = 'Disconnected. Tap Connect pendant.';
+    });
+  }
+
+  Future<void> _onStartMeetingTapped() async {
+    if (_busy) {
+      return;
+    }
+    await _toggleMeeting();
+  }
+
+  Widget _phoneShell({required Widget child, Widget? bottom}) {
+    final wide = MediaQuery.sizeOf(context).width > 640;
+    final scaffold = Scaffold(
+      backgroundColor: Colors.transparent,
+      body: SafeArea(child: child),
+      bottomNavigationBar: bottom == null
+          ? null
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: LiquidGlass(
+                radius: 30,
+                child: bottom,
+              ),
+            ),
+    );
+    final layered = Stack(
+      fit: StackFit.expand,
+      children: [
+        const MeshBackdrop(),
+        scaffold,
+      ],
+    );
+    if (!wide) {
+      return layered;
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const MeshBackdrop(),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 430),
+            child: scaffold,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final recLabel = _armed ? 'End meeting' : 'Start meeting';
-    final selected = _selectedDay;
-    final meetingsLabel =
-        'Meetings · ${DateFormat.MMMd().format(selected)}';
-    final meetingById = {for (final m in _meetings) m.id: m};
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('OpenPendant'),
-        actions: [
-          if (_dbg != null && _connected)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: Text(
-                  _dbg!.usbPowered
-                      ? 'USB'
-                      : (_dbg!.batteryPct != null ? '${_dbg!.batteryPct}%' : ''),
-                  style: TextStyle(
-                    color: (!_dbg!.usbPowered &&
-                            _dbg!.batteryPct != null &&
-                            _dbg!.batteryPct! <= 20)
-                        ? Colors.orange
-                        : null,
-                    fontWeight: FontWeight.w600,
+    final live = _armed && _showLive;
+    return _phoneShell(
+      bottom: live
+          ? null
+          : NavigationBar(
+              selectedIndex: _tab,
+              onDestinationSelected: (i) => setState(() => _tab = i),
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.wb_sunny_outlined),
+                  selectedIcon: Icon(Icons.wb_sunny),
+                  label: 'Today',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.forum_outlined),
+                  selectedIcon: Icon(Icons.forum),
+                  label: 'Meetings',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.bolt_outlined),
+                  selectedIcon: Icon(Icons.bolt),
+                  label: 'Notes',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.search),
+                  label: 'Search',
+                ),
+              ],
+            ),
+      child: live ? _liveScreen() : _tabScreen(),
+    );
+  }
+
+  Widget _tabScreen() {
+    switch (_tab) {
+      case 1:
+        return _meetingsTab();
+      case 2:
+        return _notesTab();
+      case 3:
+        return _searchTab();
+      default:
+        return _todayTab();
+    }
+  }
+
+  Widget _headerRow() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+      child: Row(
+        children: [
+          const Text(
+            'OpenPendant',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 20,
+              letterSpacing: -0.4,
+            ),
+          ),
+          const Spacer(),
+          Flexible(
+            child: GestureDetector(
+              onTap: _busy ? null : _connectPendant,
+              child: LiquidGlass(
+                radius: 20,
+                prominent: !_connected,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 7,
+                  ),
+                  child: Text(
+                    '• ${_batteryLabel()}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: _connected ? AppColors.rule : AppColors.ink,
+                    ),
                   ),
                 ),
               ),
             ),
-          IconButton(
-            tooltip: 'Memories',
-            icon: const Icon(Icons.auto_awesome),
-            onPressed: _openMemories,
           ),
-          IconButton(
-            tooltip: 'People',
-            icon: const Icon(Icons.record_voice_over),
-            onPressed: _openVoices,
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings),
-            onPressed: _openSettings,
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_horiz),
+            onSelected: (v) {
+              switch (v) {
+                case 'settings':
+                  _openSettings();
+                case 'people':
+                  _openVoices();
+                case 'memories':
+                  _openMemories();
+                case 'calibrate':
+                  _openCalibrate();
+                case 'developer':
+                  _openDeveloper();
+                case 'sleep':
+                  _sleep();
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'settings', child: Text('Settings')),
+              PopupMenuItem(value: 'people', child: Text('People')),
+              PopupMenuItem(value: 'memories', child: Text('Memories')),
+              PopupMenuItem(value: 'calibrate', child: Text('Calibrate')),
+              PopupMenuItem(value: 'developer', child: Text('Developer')),
+              PopupMenuItem(value: 'sleep', child: Text('Sleep pendant')),
+            ],
           ),
         ],
       ),
-      body: CustomScrollView(
-        slivers: [
-          SliverToBoxAdapter(
+    );
+  }
+
+  Widget _todayTab() {
+    final recent =
+        <({String title, String sub, IconData icon, VoidCallback tap})>[
+      for (final m in _meetings)
+        (
+          title: m.preview.isEmpty
+              ? m.timeRangeLabel(now: DateTime.now())
+              : m.preview,
+          sub: [
+            m.durationAt(DateTime.now()).inMinutes > 0
+                ? '${m.durationAt(DateTime.now()).inMinutes} min'
+                : SceneGroup.clock(m.startedAt.toLocal()),
+            if (m.recap != null && m.recap!.followUps.isNotEmpty)
+              '${m.recap!.followUps.length} action items',
+            if (m.live || (_armed && m.id == _sessionId)) 'Live',
+          ].join(' · '),
+          icon: Icons.forum_outlined,
+          tap: () {
+            if (_armed && m.id == _sessionId) {
+              setState(() => _showLive = true);
+            } else {
+              _openMeeting(m);
+            }
+          },
+        ),
+      for (final n in _notes)
+        (
+          title: n.text,
+          sub: 'Voice note · ${DateFormat.jm().format(n.createdAt.toLocal())}',
+          icon: Icons.bolt,
+          tap: () => setState(() => _tab = 2),
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _headerRow(),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            children: [
+              Text(
+                _greeting(),
+                style: const TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                  height: 1.15,
+                  letterSpacing: -0.6,
+                  color: AppColors.ink,
+                ),
+              ),
+              if (_status.isNotEmpty && !_armed) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _status,
+                  style: const TextStyle(color: AppColors.muted, fontSize: 13),
+                ),
+              ],
+              const SizedBox(height: 20),
+              _actionCard(
+                prominent: true,
+                fg: AppColors.ink,
+                icon: _armed ? Icons.stop_circle_outlined : Icons.graphic_eq,
+                title: _armed ? 'End meeting' : 'Start a meeting',
+                sub: _armed
+                    ? (_usingDeviceMic
+                        ? 'Recording with this $_hostMicLabel mic'
+                        : 'Or press the pendant once')
+                    : (_connected
+                        ? 'Press pendant once, or tap here.'
+                        : 'Uses this $_hostMicLabel mic. Connect the pendant for necklace audio.'),
+                onTap: _busy ? null : _onStartMeetingTapped,
+              ),
+              const SizedBox(height: 12),
+              _actionCard(
+                prominent: _noteHolding,
+                fg: AppColors.ink,
+                icon: _noteHolding ? Icons.mic : Icons.bolt,
+                iconColor: _noteHolding ? AppColors.ink : AppColors.bolt,
+                title: _noteHolding ? 'Stop note' : 'Capture a quick note',
+                sub: _noteHolding
+                    ? 'Recording — tap to save'
+                    : (_connected
+                        ? 'Tap here, or long-press pendant.'
+                        : 'Uses this $_hostMicLabel mic. Tap to record.'),
+                onTap: _busy ? null : _toggleVoiceNote,
+              ),
+              const SizedBox(height: 28),
+              const Text(
+                'Recent',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 18,
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (recent.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text(
+                    'Nothing today yet. Start a meeting or capture a note.',
+                    style: TextStyle(color: AppColors.muted),
+                  ),
+                )
+              else
+                for (final r in recent.take(8))
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: CircleAvatar(
+                      backgroundColor: AppColors.mint,
+                      child: Icon(r.icon, color: AppColors.ink, size: 18),
+                    ),
+                    title: Text(
+                      r.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(r.sub),
+                    trailing:
+                        const Icon(Icons.chevron_right, color: AppColors.muted),
+                    onTap: r.tap,
+                  ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _actionCard({
+    required Color fg,
+    required IconData icon,
+    required String title,
+    required String sub,
+    required VoidCallback? onTap,
+    Color? iconColor,
+    bool prominent = false,
+  }) {
+    final radius = BorderRadius.circular(28);
+    return LiquidGlass(
+      radius: 28,
+      prominent: prominent,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: radius,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (!_connected && _ble.device != null)
-                  MaterialBanner(
-                    content: Text(
-                      _autoReconnect
-                          ? 'Pendant disconnected — trying to reconnect…'
-                          : 'Pendant disconnected.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: _busy ? null : _manualReconnect,
-                        child: const Text('Reconnect'),
-                      ),
-                    ],
-                  ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-                  child: Row(
-                    children: [
-                      Chip(
-                        avatar: Icon(
-                          _noteHolding
-                              ? Icons.edit_note
-                              : (_armed ? Icons.groups : Icons.power_settings_new),
-                          size: 18,
-                        ),
-                        label: Text(_wearerLabel()),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _status,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    ],
+                Icon(icon, size: 22, color: iconColor ?? AppColors.rule),
+                const SizedBox(height: 22),
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: fg,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 22,
+                    letterSpacing: -0.4,
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      FilledButton(
-                        onPressed: _busy || _connected
-                            ? null
-                            : (_ble.device != null ? _manualReconnect : _connect),
-                        child: Text(_ble.device != null ? 'Reconnect' : 'Connect'),
-                      ),
-                      FilledButton.tonal(
-                        onPressed: _busy || !_connected ? null : _toggleMeeting,
-                        child: Text(recLabel),
-                      ),
-                      OutlinedButton(
-                        onPressed: _busy || (!_connected && !_armed)
-                            ? null
-                            : _sleep,
-                        child: const Text('Sleep'),
-                      ),
-                      if (Platform.isMacOS && CursorPrefs.enabled)
-                        FilterChip(
-                          label: Text(_commandNext ? 'Command next' : 'Command'),
-                          selected: _commandNext,
-                          onSelected: (on) => setState(() => _commandNext = on),
-                        ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
-                  child: Text(
-                    _dayHeading(),
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        for (final day in _stripDays())
-                          Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: FilterChip(
-                              label: Text(_stripLabel(day)),
-                              selected: _sameDay(day, selected),
-                              onSelected: (_) => _selectDay(day),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
-                  child: Text(
-                    'Notes · ${DateFormat.MMMd().format(selected)}',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _noteDraft,
-                          decoration: const InputDecoration(
-                            hintText: 'Hold the button to talk, or type a note',
-                            border: OutlineInputBorder(),
-                            isDense: true,
-                          ),
-                          onSubmitted: (_) => _addTypedNote(),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: _addTypedNote,
-                        child: const Text('Add'),
-                      ),
-                    ],
-                  ),
-                ),
-                if (_notes.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: Text('No notes this day. Hold the pendant button to capture one.'),
-                  )
-                else
-                  for (final n in _notes)
-                    Card(
-                      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                      child: ListTile(
-                        title: Text(n.text),
-                        subtitle: Text(_noteSubtitle(n, meetingById)),
-                        trailing: IconButton(
-                          tooltip: 'Delete',
-                          icon: const Icon(Icons.close),
-                          onPressed: () async {
-                            await _store.deleteNote(n.id);
-                            await _reload();
-                          },
-                        ),
-                      ),
-                    ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
-                  child: Text(
-                    meetingsLabel,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: TextField(
-                    controller: _search,
-                    decoration: const InputDecoration(
-                      hintText: 'Search notes and meetings',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.search),
-                    ),
-                    onSubmitted: (_) => _reload(),
-                    onChanged: (_) => _reload(),
+                const SizedBox(height: 6),
+                Text(
+                  sub,
+                  style: TextStyle(
+                    color: fg.withValues(alpha: 0.62),
+                    fontSize: 13,
+                    height: 1.35,
                   ),
                 ),
               ],
             ),
           ),
-          if (_meetings.isEmpty)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'No meetings this day. Click the pendant button or Start meeting.',
-                ),
-              ),
-            )
-          else
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, i) {
-                  final meeting = _meetings[i];
-                  final people = meeting.displaySpeakers.join(', ');
-                  final live = _armed && meeting.id == _sessionId;
-                  return Card(
-                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        ListTile(
-                          isThreeLine: true,
+        ),
+      ),
+    );
+  }
+
+  Widget _meetingsTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _headerRow(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+          child: Text(
+            'Meetings · ${DateFormat.MMMd().format(_selectedDay)}',
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 20,
+              letterSpacing: -0.4,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final day in _stripDays())
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: FilterChip(
+                      label: Text(_stripLabel(day)),
+                      selected: _sameDay(day, _selectedDay),
+                      onSelected: (_) => _selectDay(day),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: _meetings.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'No meetings this day. Press the pendant or start from Today.',
+                    style: TextStyle(color: AppColors.muted),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+                  itemCount: _meetings.length,
+                  itemBuilder: (context, i) {
+                    final meeting = _meetings[i];
+                    final live = _armed && meeting.id == _sessionId;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: LiquidGlass(
+                        radius: 22,
+                        blur: false,
+                        child: ListTile(
                           title: Text(
                             [
                               if (live) 'Live · ',
                               meeting.timeRangeLabel(now: DateTime.now()),
                             ].join(),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                           subtitle: Text(
-                            [
-                              if (people.isNotEmpty) people,
-                              if (meeting.notes.isNotEmpty)
-                                '${meeting.notes.length} note${meeting.notes.length == 1 ? '' : 's'}',
-                              meeting.preview.isEmpty
-                                  ? 'No transcript yet'
-                                  : meeting.preview,
-                            ].join('\n'),
-                            maxLines: 4,
+                            meeting.preview.isEmpty
+                                ? 'No transcript yet'
+                                : meeting.preview,
+                            maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          onTap: () => _openMeeting(meeting),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            if (live) {
+                              setState(() => _showLive = true);
+                            } else {
+                              _openMeeting(meeting);
+                            }
+                          },
                           onLongPress: () =>
                               _openMeeting(meeting, developer: true),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: TextButton.icon(
-                              onPressed: _busy || _cleaning
-                                  ? null
-                                  : () => _cleanMeeting(meeting),
-                              icon: const Icon(Icons.auto_fix_high, size: 18),
-                              label: Text(
-                                meeting.recap == null
-                                    ? 'Recap'
-                                    : 'Refresh recap',
-                              ),
-                            ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _notesTab() {
+    final meetingById = {for (final m in _meetings) m.id: m};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _headerRow(),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+          child: Text(
+            'Notes',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 20,
+              letterSpacing: -0.4,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+          child: FilledButton.tonal(
+            onPressed: _busy ? null : _toggleVoiceNote,
+            child: Text(_noteHolding ? 'Stop note' : 'Capture a quick note'),
+          ),
+        ),
+        Expanded(
+          child: _notes.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'No notes this day. Tap to record on this device, or long-press the pendant.',
+                    style: TextStyle(color: AppColors.muted),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+                  itemCount: _notes.length,
+                  itemBuilder: (context, i) {
+                    final n = _notes[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: LiquidGlass(
+                        radius: 22,
+                        blur: false,
+                        child: ListTile(
+                          title: Text(n.text),
+                          subtitle: Text(_noteSubtitle(n, meetingById)),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () async {
+                              await _store.deleteNote(n.id);
+                              await _reload();
+                            },
                           ),
                         ),
-                      ],
-                    ),
-                  );
-                },
-                childCount: _meetings.length,
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _searchTab() {
+    final meetingById = {for (final m in _meetings) m.id: m};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _headerRow(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+          child: TextField(
+            controller: _search,
+            decoration: InputDecoration(
+              hintText: 'Search notes and meetings',
+              prefixIcon: const Icon(Icons.search),
+              filled: true,
+              fillColor: const Color(0x99FFFFFF),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
               ),
             ),
-        ],
-      ),
+            onChanged: (_) => _reload(),
+            onSubmitted: (_) => _reload(),
+          ),
+        ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+            children: [
+              for (final n in _notes)
+                ListTile(
+                  leading: const Icon(Icons.bolt, color: AppColors.teal),
+                  title: Text(n.text),
+                  subtitle: Text(_noteSubtitle(n, meetingById)),
+                  onTap: () => setState(() => _tab = 2),
+                ),
+              for (final m in _meetings)
+                ListTile(
+                  leading:
+                      const Icon(Icons.forum_outlined, color: AppColors.teal),
+                  title: Text(
+                    m.preview.isEmpty
+                        ? m.timeRangeLabel(now: DateTime.now())
+                        : m.preview,
+                  ),
+                  subtitle: Text(m.timeRangeLabel(now: DateTime.now())),
+                  onTap: () => _openMeeting(m),
+                ),
+              if (_notes.isEmpty && _meetings.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'No matches this day.',
+                    style: TextStyle(color: AppColors.muted),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _liveScreen() {
+    final meeting = _currentMeeting;
+    final title = meeting?.recap?.headline.trim().isNotEmpty == true
+        ? meeting!.recap!.headline.trim()
+        : 'Meeting';
+    final imu = _dbg?.imuSleep == true;
+    final segs = meeting?.segments ?? const <TranscriptSegment>[];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 12, 0),
+          child: Row(
+            children: [
+              IconButton(
+                onPressed: () => setState(() => _showLive = false),
+                icon: const Icon(Icons.arrow_back_ios_new, size: 18),
+              ),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 18,
+                    letterSpacing: -0.3,
+                  ),
+                ),
+              ),
+              LiquidGlass(
+                radius: 16,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  child: const Text(
+                    '• LIVE',
+                    style: TextStyle(
+                      color: AppColors.live,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _meetingElapsed().isEmpty ? '00:00' : _meetingElapsed(),
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 56,
+            fontWeight: FontWeight.w200,
+            letterSpacing: 1.5,
+            color: AppColors.ink,
+          ),
+        ),
+        const Text(
+          'Recording',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.live,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: LiquidGlass(
+            radius: 20,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Text(
+                _usingDeviceMic
+                    ? 'Recording with this $_hostMicLabel mic'
+                    : (_connected
+                        ? (imu
+                            ? 'OpenPendant connected · resting'
+                            : 'OpenPendant connected · audio clear')
+                        : 'Pendant disconnected'),
+                style: const TextStyle(
+                  color: AppColors.rule,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 18, 28, 8),
+          child: _WaveBars(levels: _levels),
+        ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+            children: [
+              TranscriptThread(segments: segs),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _markMoment,
+                  child: const Text('+ Mark moment'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _busy ? null : _toggleVoiceNote,
+                  child: Text(_noteHolding ? 'Stop note' : '+ Private note'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.live,
+              side: const BorderSide(color: Color(0x66FF3B30)),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: const StadiumBorder(),
+            ),
+            onPressed: _busy ? null : _toggleMeeting,
+            child: const Column(
+              children: [
+                Text(
+                  'End meeting',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+                Text(
+                  'or press pendant once',
+                  style: TextStyle(fontSize: 12, color: AppColors.muted),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2000,5 +2703,40 @@ class _HomePageState extends State<HomePage> {
       return when;
     }
     return '$when · in ${SceneGroup.clock(m.startedAt.toLocal())} meeting';
+  }
+}
+
+class _WaveBars extends StatelessWidget {
+  const _WaveBars({required this.levels});
+
+  final List<double> levels;
+
+  @override
+  Widget build(BuildContext context) {
+    final bars = levels.isEmpty ? List<double>.filled(20, 0.12) : levels;
+    return SizedBox(
+      height: 56,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          for (final l in bars)
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 1.2),
+                child: FractionallySizedBox(
+                  heightFactor: l.clamp(0.08, 1.0),
+                  alignment: Alignment.bottomCenter,
+                  child: const DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: AppColors.rule,
+                      borderRadius: BorderRadius.all(Radius.circular(1)),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }

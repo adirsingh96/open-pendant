@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../audio/speech_vad.dart';
 import '../ble/pendant_ble.dart';
 import '../stt/vad_cal.dart';
+import 'app_page.dart';
 
 class CalibratePage extends StatefulWidget {
   const CalibratePage({
@@ -102,8 +103,7 @@ class _CalibratePageState extends State<CalibratePage> {
       final floor = suggestEnergyFloor(pcm);
       await VadCal.save(floor);
       setState(
-        () => _status =
-            'Saved. Soft speech at this wear distance should pass. '
+        () => _status = 'Saved. Soft speech at this wear distance should pass. '
             '${VadCal.statusLine()}',
       );
     } catch (e) {
@@ -118,7 +118,7 @@ class _CalibratePageState extends State<CalibratePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AppPage(
       appBar: AppBar(title: const Text('Calibrate mic')),
       body: ListView(
         padding: const EdgeInsets.all(16),
@@ -130,7 +130,8 @@ class _CalibratePageState extends State<CalibratePage> {
             'talk is not skipped.',
           ),
           const SizedBox(height: 12),
-          Text(VadCal.statusLine(), style: Theme.of(context).textTheme.titleSmall),
+          Text(VadCal.statusLine(),
+              style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 12),
           Card(
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
