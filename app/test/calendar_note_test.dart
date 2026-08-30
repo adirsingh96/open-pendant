@@ -49,6 +49,38 @@ void main() {
     );
   });
 
+  test('note commands are dropped from journal text', () {
+    expect(leftoverAfterNoteCommand('Take a note, buy milk'), isEmpty);
+    expect(
+      leftoverAfterNoteCommand('After lunch. Take a note: ship tonight'),
+      'After lunch.',
+    );
+    expect(
+      leftoverAfterNoteCommand('we should ship tomorrow'),
+      'we should ship tomorrow',
+    );
+    final segs = [
+      TranscriptSegment(
+        startS: 0,
+        endS: 1,
+        spokenAt: DateTime.utc(2026, 8, 22),
+        text: 'hello there',
+        speaker: 'Aditya',
+      ),
+      TranscriptSegment(
+        startS: 1,
+        endS: 2,
+        spokenAt: DateTime.utc(2026, 8, 22, 0, 0, 1),
+        text: 'Take a note, park the car',
+        speaker: 'Aditya',
+      ),
+    ];
+    final kept = segsWithoutNoteCommands(segs);
+    expect(kept, hasLength(1));
+    expect(kept.single.text, 'hello there');
+    expect(joinSegmentText(kept), 'Aditya: hello there');
+  });
+
   test('event title is truncated', () {
     expect(calendarEventTitle('buy milk'), 'buy milk');
     expect(calendarEventTitle('x' * 90).endsWith('…'), isTrue);

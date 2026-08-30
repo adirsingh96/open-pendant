@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'day_recap.dart';
+import 'meeting.dart';
 import 'memory_chat.dart';
 import 'models.dart';
 
@@ -14,13 +15,14 @@ class ClipStore {
   Future<Database> _open() async {
     if (_db != null) {
       await _ensureNotesTable(_db!);
+      await _ensureMeetingsSchema(_db!);
       return _db!;
     }
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 9,
+      version: 10,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -51,6 +53,7 @@ CREATE TABLE clips (
         await _createDayRecapTable(db);
         await _createMemoryChatTable(db);
         await _createNotesTable(db);
+        await _createMeetingsTable(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -123,9 +126,15 @@ CREATE TABLE clips (
         if (oldVersion < 9) {
           await _createNotesTable(db);
         }
+        if (oldVersion < 10) {
+          await _upgradeNotesMeetingId(db);
+          await _createMeetingsTable(db);
+          await _backfillMeetings(db);
+        }
       },
     );
     await _ensureNotesTable(_db!);
+    await _ensureMeetingsSchema(_db!);
     return _db!;
   }
 
@@ -399,6 +408,49 @@ CREATE TABLE memory_chats (
 
   Future<void> _ensureNotesTable(DatabaseExecutor db) async {
     await _createNotesTable(db);
+    await _upgradeNotesMeetingId(db);
+  }
+
+  Future<void> _ensureMeetingsSchema(DatabaseExecutor db) async {
+    await _createMeetingsTable(db);
+    await _backfillMeetings(db);
+  }
+
+  Future<void> _upgradeNotesMeetingId(DatabaseExecutor db) async {
+    try {
+      await db.execute('ALTER TABLE notes ADD COLUMN meeting_id TEXT');
+    } catch (_) {}
+  }
+
+  Future<void> _createMeetingsTable(DatabaseExecutor db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS meetings (
+  id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  recap_json TEXT NOT NULL DEFAULT '',
+  recap_model TEXT,
+  recap_cost_usd REAL NOT NULL DEFAULT 0,
+  recap_updated_at TEXT
+)''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at)',
+    );
+  }
+
+  Future<void> _backfillMeetings(DatabaseExecutor db) async {
+    await db.execute('''
+INSERT OR IGNORE INTO meetings (id, started_at, ended_at, title, recap_json)
+SELECT session_id,
+       MIN(started_at),
+       MAX(started_at),
+       '',
+       ''
+FROM clips
+WHERE session_id IS NOT NULL AND trim(session_id) != ''
+GROUP BY session_id
+''');
   }
 
   Future<void> _createNotesTable(DatabaseExecutor db) async {
@@ -407,7 +459,8 @@ CREATE TABLE IF NOT EXISTS notes (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
   text TEXT NOT NULL,
-  clip_id TEXT
+  clip_id TEXT,
+  meeting_id TEXT
 )''');
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at)',
@@ -421,6 +474,7 @@ CREATE TABLE IF NOT EXISTS notes (
       'created_at': note.createdAt.toUtc().toIso8601String(),
       'text': note.text,
       'clip_id': note.clipId,
+      'meeting_id': note.meetingId,
     });
   }
 
@@ -459,8 +513,162 @@ CREATE TABLE IF NOT EXISTS notes (
               DateTime.fromMillisecondsSinceEpoch(0),
           text: r['text'] as String? ?? '',
           clipId: r['clip_id'] as String?,
+          meetingId: r['meeting_id'] as String?,
         ),
     ];
+  }
+
+  Future<void> startMeeting(MeetingRecord meeting) async {
+    final db = await _open();
+    await db.insert(
+      'meetings',
+      {
+        'id': meeting.id,
+        'started_at': meeting.startedAt.toUtc().toIso8601String(),
+        'ended_at': meeting.endedAt?.toUtc().toIso8601String(),
+        'title': meeting.title,
+        'recap_json': '',
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  Future<void> endMeeting(String id, {DateTime? endedAt}) async {
+    final db = await _open();
+    await db.update(
+      'meetings',
+      {
+        'ended_at': (endedAt ?? DateTime.now().toUtc()).toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> upsertMeetingRecap({
+    required String meetingId,
+    required DayRecap recap,
+  }) async {
+    final db = await _open();
+    await db.update(
+      'meetings',
+      {
+        'recap_json': jsonEncode(recap.toJson()),
+        'recap_model': recap.model,
+        'recap_cost_usd': recap.costUsd,
+        'recap_updated_at':
+            (recap.updatedAt ?? DateTime.now().toUtc()).toIso8601String(),
+        if (recap.headline.trim().isNotEmpty) 'title': recap.headline.trim(),
+      },
+      where: 'id = ?',
+      whereArgs: [meetingId],
+    );
+  }
+
+  Future<List<ClipRecord>> clipsForSession(String sessionId) async {
+    final db = await _open();
+    return _clipsForSession(db, sessionId);
+  }
+
+  Future<List<ClipRecord>> _clipsForSession(Database db, String sessionId) async {
+    final rows = await db.query(
+      'clips',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'seq ASC, started_at ASC',
+    );
+    final clips = <ClipRecord>[];
+    for (final row in rows) {
+      clips.add(await _clipFromRow(db, row));
+    }
+    return clips;
+  }
+
+  DayRecap? _meetingRecapFromRow(Map<String, Object?> r) {
+    final raw = (r['recap_json'] as String? ?? '').trim();
+    if (raw.isEmpty) {
+      return null;
+    }
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+    return DayRecap.fromJson(
+      dayKey: r['id'] as String? ?? '',
+      json: json,
+      model: r['recap_model'] as String?,
+      costUsd: (r['recap_cost_usd'] as num?)?.toDouble() ?? 0,
+      updatedAt: DateTime.tryParse(r['recap_updated_at'] as String? ?? ''),
+    );
+  }
+
+  Future<List<MeetingRecord>> listMeetingsInRange({
+    required DateTime from,
+    required DateTime to,
+    String query = '',
+  }) async {
+    final db = await _open();
+    await _backfillMeetings(db);
+    final start = from.toUtc().toIso8601String();
+    final end = to.toUtc().toIso8601String();
+    final rows = await db.query(
+      'meetings',
+      where: 'started_at >= ? AND started_at <= ?',
+      whereArgs: [start, end],
+      orderBy: 'started_at DESC',
+    );
+    final q = query.trim().toLowerCase();
+    final out = <MeetingRecord>[];
+    for (final r in rows) {
+      final id = r['id'] as String;
+      final clips = await _clipsForSession(db, id);
+      final segs = [
+        for (final c in clips) ...c.segments,
+      ]..sort((a, b) => a.spokenAt.compareTo(b.spokenAt));
+      final noteRows = await db.query(
+        'notes',
+        where: 'meeting_id = ?',
+        whereArgs: [id],
+        orderBy: 'created_at DESC',
+      );
+      final notes = [
+        for (final n in noteRows)
+          SpokenNote(
+            id: n['id'] as String,
+            createdAt: DateTime.tryParse(n['created_at'] as String? ?? '') ??
+                DateTime.fromMillisecondsSinceEpoch(0),
+            text: n['text'] as String? ?? '',
+            clipId: n['clip_id'] as String?,
+            meetingId: n['meeting_id'] as String?,
+          ),
+      ];
+      final meeting = MeetingRecord(
+        id: id,
+        startedAt: DateTime.tryParse(r['started_at'] as String? ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+        endedAt: DateTime.tryParse(r['ended_at'] as String? ?? ''),
+        title: r['title'] as String? ?? '',
+        recap: _meetingRecapFromRow(r),
+        segments: segs,
+        notes: notes,
+        clips: clips,
+      );
+      if (q.isNotEmpty) {
+        final blob = [
+          meeting.title,
+          meeting.preview,
+          ...segs.map((s) => s.text),
+          ...notes.map((n) => n.text),
+        ].join(' ').toLowerCase();
+        if (!blob.contains(q)) {
+          continue;
+        }
+      }
+      out.add(meeting);
+    }
+    return out;
   }
 
   Future<void> _createDayRecapTable(DatabaseExecutor db) async {

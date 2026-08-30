@@ -144,7 +144,7 @@ class _VoicesPageState extends State<VoicesPage> {
           const Text(
             'Type a name, then tap Record and read the script below out loud. '
             'Aim for the full paragraph (about 8–10 seconds). Up to 4 voices. '
-            'Unknown speakers later show as A, B, …',
+            'A local speaker model matches these samples; Saaras only writes the words.',
           ),
           const SizedBox(height: 12),
           Card(

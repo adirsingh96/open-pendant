@@ -57,4 +57,14 @@ class PcmReassembler {
     pcmByteLength = 0;
     lastComplete = const [];
   }
+
+  void replaceWith(List<int> pcm) {
+    reset();
+    if (pcm.isEmpty) {
+      return;
+    }
+    complete.add(PcmChunk(seq: 0, bytes: List<int>.from(pcm)));
+    lastComplete = complete.last.bytes;
+    pcmByteLength = pcm.length;
+  }
 }

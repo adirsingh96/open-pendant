@@ -13,6 +13,7 @@ class ClipPage extends StatefulWidget {
     this.rangeSegments,
     this.onRenameSpeaker,
     this.showDeveloper = false,
+    this.header,
   });
 
   factory ClipPage.single({
@@ -46,6 +47,7 @@ class ClipPage extends StatefulWidget {
     List<ClipRecord> clips = const [],
     Future<void> Function(String from, String to)? onRenameSpeaker,
     bool showDeveloper = false,
+    Widget? header,
   }) {
     return ClipPage(
       clips: clips,
@@ -53,6 +55,7 @@ class ClipPage extends StatefulWidget {
       rangeSegments: segments,
       onRenameSpeaker: onRenameSpeaker,
       showDeveloper: showDeveloper,
+      header: header,
     );
   }
 
@@ -61,6 +64,7 @@ class ClipPage extends StatefulWidget {
   final List<TranscriptSegment>? rangeSegments;
   final Future<void> Function(String from, String to)? onRenameSpeaker;
   final bool showDeveloper;
+  final Widget? header;
 
   static Color speakerTint(String? name, ColorScheme cs) {
     final n = (name ?? '').trim();
@@ -189,6 +193,10 @@ class _ClipPageState extends State<ClipPage> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
         children: [
+          if (widget.header != null) ...[
+            widget.header!,
+            const SizedBox(height: 12),
+          ],
           if (engine.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),

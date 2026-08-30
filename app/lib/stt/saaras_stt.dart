@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../audio/speech_vad.dart';
 import '../db/models.dart';
 import 'stt_pricing.dart';
+import 'voice_store.dart';
 
 /// Sarvam Saaras v4 REST. Speaker diarization is Batch-only and too slow
 /// for live ≤30s pendant clips, so live capture uses REST timestamps.
@@ -65,6 +66,53 @@ class SaarasStt {
       billedSeconds: billedSeconds,
     );
   }
+}
+
+/// REST has no speaker-reference upload. Map enrolled People onto Saaras
+/// turns: unlabeled speech is the first voice (wearer); Speaker 1/2… follow
+/// enrollment order when diarized ids are present.
+TranscriptResult applySaarasVoiceTags(
+  TranscriptResult from,
+  List<VoiceProfile> voices,
+) {
+  final names = voices
+      .map((v) => v.name.trim())
+      .where((n) => n.isNotEmpty)
+      .toList();
+  if (names.isEmpty || from.segments.isEmpty) {
+    return from;
+  }
+  final segs = [
+    for (final s in from.segments)
+      s.copyWith(speaker: mapSaarasSpeaker(s.speaker, names)),
+  ];
+  final labeled = segs
+      .map((s) => s.labeledText)
+      .where((t) => t.isNotEmpty)
+      .join(' ');
+  return TranscriptResult(
+    text: labeled.isNotEmpty ? labeled : from.text,
+    model: from.model,
+    segments: segs,
+    inputTokens: from.inputTokens,
+    outputTokens: from.outputTokens,
+    costUsd: from.costUsd,
+  );
+}
+
+String? mapSaarasSpeaker(String? speaker, List<String> names) {
+  if (names.isEmpty) {
+    return speaker;
+  }
+  final who = (speaker ?? '').trim();
+  if (who.isEmpty) {
+    return names.first;
+  }
+  final n = int.tryParse(RegExp(r'(\d+)$').firstMatch(who)?.group(1) ?? '');
+  if (n != null && n >= 1 && n <= names.length) {
+    return names[n - 1];
+  }
+  return who;
 }
 
 TranscriptResult parseSaarasTranscript({

@@ -349,10 +349,12 @@ class SpokenNote {
     required this.createdAt,
     required this.text,
     this.clipId,
+    this.meetingId,
   });
 
   final String id;
   final DateTime createdAt;
   final String text;
   final String? clipId;
+  final String? meetingId;
 }

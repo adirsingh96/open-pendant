@@ -6,6 +6,7 @@
  */
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
 	msm261d3526hicpm-c-en {
@@ -15,6 +16,15 @@
 	lsm6ds3tr-c-en {
 		regulator-always-on;
 		startup-delay-us = <20000>;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		/* Mouse microswitch: COM → GND, NO → D10 (P1.15). Internal pull-up. */
+		user_btn: user_btn {
+			gpios = <&xiao_d 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "USER";
+		};
 	};
 };
 

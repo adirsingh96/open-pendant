@@ -28,25 +28,7 @@ class SceneGroup {
   List<String> get displaySpeakers =>
       speakers.where(isDisplaySpeaker).toList();
 
-  String timeRangeLabel() {
-    final a = startedAt.toLocal();
-    final b = endedAt.toLocal();
-    final start = _clock(a);
-    if (b.difference(a) < const Duration(minutes: 1)) {
-      return start;
-    }
-    return '$start–${_clock(b)}';
-  }
-
-  static bool isDisplaySpeaker(String w) {
-    final t = w.trim();
-    if (t.isEmpty) {
-      return false;
-    }
-    return RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(t);
-  }
-
-  static String _clock(DateTime t) {
+  static String clock(DateTime t) {
     final h = t.hour;
     final m = t.minute.toString().padLeft(2, '0');
     final am = h >= 12;
@@ -55,6 +37,24 @@ class SceneGroup {
       hr = 12;
     }
     return '$hr:$m ${am ? 'PM' : 'AM'}';
+  }
+
+  String timeRangeLabel() {
+    final a = startedAt.toLocal();
+    final b = endedAt.toLocal();
+    final start = clock(a);
+    if (b.difference(a) < const Duration(minutes: 1)) {
+      return start;
+    }
+    return '$start–${clock(b)}';
+  }
+
+  static bool isDisplaySpeaker(String w) {
+    final t = w.trim();
+    if (t.isEmpty) {
+      return false;
+    }
+    return RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(t);
   }
 
   String get preview {

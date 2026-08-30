@@ -17,11 +17,13 @@ import '../audio/wav_writer.dart';
 import '../ble/pendant_ble.dart';
 import '../db/clip_store.dart';
 import '../db/day_recap.dart';
+import '../db/meeting.dart';
 import '../db/models.dart';
 import '../stt/api_key_store.dart';
 import '../stt/cursor_command.dart';
 import '../stt/cursor_prefs.dart';
 import '../macos/cursor_composer.dart';
+import '../stt/local_speaker.dart';
 import '../stt/openai_refine.dart';
 import '../stt/openai_stt.dart';
 import '../stt/saaras_stt.dart';
@@ -30,7 +32,6 @@ import '../stt/stt_prefs.dart';
 import '../stt/voice_store.dart';
 import 'clip_page.dart';
 import 'calibrate_page.dart';
-import 'day_recap_card.dart';
 import 'developer_page.dart';
 import 'settings_page.dart';
 import 'voices_page.dart';
@@ -52,6 +53,7 @@ class _HomePageState extends State<HomePage> {
   static const _quietRotate = Duration(seconds: 8);
   static const _cursorQuietRotate = Duration(milliseconds: 1500);
   static const _noPcmRotate = Duration(seconds: 2);
+  static const _notePrerollBytes = 16000 * 2 * 7 ~/ 10;
 
   AppLifecycleListener? _lifecycle;
   Timer? _armTick;
@@ -82,13 +84,20 @@ class _HomePageState extends State<HomePage> {
   int _seq = 0;
   final _sttQueue = <ClipRecord>[];
   bool _sttBusy = false;
-  List<SceneGroup> _scenes = [];
+  List<MeetingRecord> _meetings = [];
   List<SpokenNote> _notes = [];
   List<TranscriptSegment> _rangeSegs = [];
-  List<ClipRecord> _errorClips = [];
-  DayRecap? _dayRecap;
   bool _cleaning = false;
   bool _commandNext = false;
+  bool _noteHolding = false;
+  bool _noteTempArm = false;
+  int _noteFromByte = 0;
+  int _btnSeqSeen = 0;
+  bool _btnSeqPrimed = false;
+  DateTime? _meetingStartedAt;
+  Future<void>? _noteBegin;
+  final _buttonNoteIds = <String>{};
+  final _buttonNoteMeetingIds = <String, String>{};
   List<DateTime> _speechDays = [];
   DateTime? _rangeFrom;
   DateTime? _rangeTo;
@@ -143,8 +152,9 @@ class _HomePageState extends State<HomePage> {
     final wasSleep = _imuWasSleep;
     _imuWasSleep = s.imuSleep;
     setState(() => _dbg = s);
+    _syncButtonNote(s);
     _syncDev();
-    if (!_armed) {
+    if (!_armed || _noteHolding) {
       return;
     }
     if (s.imuSleep && !wasSleep) {
@@ -154,6 +164,147 @@ class _HomePageState extends State<HomePage> {
       _lastSpeechAt = DateTime.now();
       _hadSpeechInChunk = false;
       _refreshArmedStatus();
+    }
+  }
+
+  void _syncButtonNote(PendantStatus s) {
+    var held = s.noteHeld;
+    if (s.buttonSeq != 0 && !_btnSeqPrimed) {
+      _btnSeqSeen = s.buttonSeq;
+      _btnSeqPrimed = true;
+    } else if (s.buttonSeq != 0 && s.buttonSeq != _btnSeqSeen) {
+      _btnSeqSeen = s.buttonSeq;
+      if (s.buttonEvent == 3) {
+        held = true;
+      } else if (s.buttonEvent == 4) {
+        held = false;
+      } else if (s.buttonEvent == 1 && !_noteHolding && !_busy) {
+        unawaited(_toggleMeeting());
+      }
+    }
+    if (held && !_noteHolding) {
+      _noteHolding = true;
+      _noteBegin = _beginButtonNote();
+    } else if (!held && _noteHolding) {
+      _noteHolding = false;
+      unawaited(_endButtonNote());
+    }
+  }
+
+  Future<void> _beginButtonNote() async {
+    await NotePrefs.load();
+    if (!NotePrefs.enabled) {
+      _noteHolding = false;
+      return;
+    }
+    if (!_connected) {
+      _noteHolding = false;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Connect the pendant to take a note.')),
+        );
+      }
+      return;
+    }
+    try {
+      if (!_armed) {
+        _noteTempArm = true;
+        await _ble.startRecording(_onPcm);
+        _noteFromByte = 0;
+      } else {
+        _noteTempArm = false;
+        var from = _ble.reassembler.pcmByteLength - _notePrerollBytes;
+        if (from < 0) {
+          from = 0;
+        }
+        if (from.isOdd) {
+          from -= 1;
+        }
+        _noteFromByte = from;
+      }
+      if (mounted) {
+        setState(() => _status = 'Note… hold to talk, release to save');
+      }
+    } catch (e) {
+      _noteHolding = false;
+      _noteTempArm = false;
+      if (mounted) {
+        setState(() => _status = '$e');
+      }
+    }
+  }
+
+  Future<void> _endButtonNote() async {
+    await _noteBegin;
+    if (!NotePrefs.enabled) {
+      return;
+    }
+    final all = _ble.reassembler.pcmBytes();
+    var from = _noteFromByte;
+    if (from < 0) {
+      from = 0;
+    }
+    if (from > all.length) {
+      from = all.length;
+    }
+    if (from.isOdd) {
+      from -= 1;
+    }
+    final slice = all.sublist(from);
+    if (_noteTempArm) {
+      try {
+        await _ble.stopRecording();
+      } catch (_) {}
+      _ble.reassembler.reset();
+      _noteTempArm = false;
+    } else {
+      _ble.reassembler.replaceWith(all.sublist(0, from));
+      _bytes = _ble.reassembler.pcmByteLength;
+    }
+    if (slice.length < 3200) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Hold a bit longer while you speak.')),
+        );
+        _refreshArmedStatus();
+      }
+      return;
+    }
+    try {
+      final started = DateTime.now().toUtc().subtract(
+            Duration(milliseconds: (slice.length / 2 / 16).round()),
+          );
+      final duration = slice.length / 2 / 16000;
+      final id = const Uuid().v4();
+      final dir = await getApplicationDocumentsDirectory();
+      final wavPath = p.join(dir.path, 'clips', '$id.wav');
+      await Directory(p.dirname(wavPath)).create(recursive: true);
+      await File(wavPath).writeAsBytes(pcmToWav(pcm: slice), flush: true);
+      final clip = ClipRecord(
+        id: id,
+        startedAt: started,
+        durationS: duration,
+        fullText: '',
+        wavPath: wavPath,
+        sttModel: null,
+        status: 'transcribing',
+        sessionId: null,
+        seq: 0,
+      );
+      _buttonNoteIds.add(id);
+      if (_armed && _sessionId != null) {
+        _buttonNoteMeetingIds[id] = _sessionId!;
+      }
+      await _store.upsertClip(clip);
+      await _reload();
+      _enqueueStt(clip);
+      if (mounted) {
+        setState(() => _status = 'Saving note…');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _status = '$e');
+      }
     }
   }
 
@@ -171,17 +322,12 @@ class _HomePageState extends State<HomePage> {
     final allSegs = _search.text.trim().isEmpty
         ? segs
         : await _store.listSegmentsInRange(from: from, to: to);
-    final clips = await _store.listClips();
-    final errors = clips
-        .where(
-          (c) =>
-              c.status == 'error' &&
-              !c.startedAt.isBefore(from.toUtc()) &&
-              !c.startedAt.isAfter(to.toUtc()),
-        )
-        .toList();
-    final recap = await _store.getDayRecap(_dayKey(from));
     final notes = await _store.listNotesInRange(
+      from: from,
+      to: to,
+      query: _search.text,
+    );
+    final meetings = await _store.listMeetingsInRange(
       from: from,
       to: to,
       query: _search.text,
@@ -196,10 +342,8 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     setState(() {
-      _scenes = SceneGroup.fromSegments(segs);
+      _meetings = meetings;
       _rangeSegs = allSegs;
-      _errorClips = errors;
-      _dayRecap = recap;
       _notes = notes;
       _speechDays = speechDays;
       _totalCostUsd = cost;
@@ -224,15 +368,6 @@ class _HomePageState extends State<HomePage> {
     return _calendarDay(
       _rangeFrom ?? DateTime(now.year, now.month, now.day),
     );
-  }
-
-  bool get _recapStale {
-    final recap = _dayRecap;
-    final updated = recap?.updatedAt;
-    if (recap == null || updated == null) {
-      return false;
-    }
-    return _rangeSegs.any((s) => s.spokenAt.isAfter(updated));
   }
 
   List<DateTime> _stripDays() {
@@ -282,24 +417,14 @@ class _HomePageState extends State<HomePage> {
     return full;
   }
 
-  String _dayKey(DateTime local) {
-    final d = local.toLocal();
-    return '${d.year.toString().padLeft(4, '0')}-'
-        '${d.month.toString().padLeft(2, '0')}-'
-        '${d.day.toString().padLeft(2, '0')}';
-  }
-
-  Future<void> _cleanDay() async {
-    final now = DateTime.now();
-    final from = _rangeFrom ?? DateTime(now.year, now.month, now.day);
-    final to = _rangeTo ?? DateTime(now.year, now.month, now.day, 23, 59, 59);
-    final segs = await _store.listSegmentsInRange(from: from, to: to);
+  Future<void> _cleanMeeting(MeetingRecord meeting) async {
+    final segs = meeting.segments.where((s) => s.text.trim().isNotEmpty).toList();
     if (segs.isEmpty) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nothing to clean in this day yet.')),
+        const SnackBar(content: Text('Nothing to recap in this meeting yet.')),
       );
       return;
     }
@@ -315,41 +440,38 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() => _cleaning = true);
     try {
+      final start = meeting.startedAt.toLocal();
+      final end = (meeting.endedAt ?? DateTime.now()).toLocal();
       final result = await _refine.cleanAndRecapDay(
         apiKey: key,
-        dayKey: _dayKey(from),
-        dateLabel: DateFormat.yMMMMEEEEd().format(from),
+        dayKey: meeting.id,
+        dateLabel: 'Meeting ${DateFormat.MMMd().add_jm().format(start)}',
         rangeLabel:
-            '${DateFormat.MMMd().add_jm().format(segs.first.spokenAt.toLocal())} – '
-            '${DateFormat.MMMd().add_jm().format(segs.last.spokenAt.toLocal())} '
+            '${DateFormat.MMMd().add_jm().format(start)} – '
+            '${DateFormat.jm().format(end)} '
             '(only these recorded turns; do not invent later hours)',
         segments: segs,
       );
       await _store.applyCleanedSegments(result.segments);
-      await _store.upsertDayRecap(
+      await _store.upsertMeetingRecap(
+        meetingId: meeting.id,
         recap: result.recap,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
       );
       await _reload();
       final memStatus = await _syncMem0(
         recap: result.recap,
-        dateLabel: DateFormat.yMMMMEEEEd().format(from),
+        dateLabel: DateFormat.MMMd().add_jm().format(start),
       );
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Cleaned ${DateFormat.yMMMMEEEEd().format(from)}. $memStatus',
-          ),
-        ),
+        SnackBar(content: Text('Meeting recap saved. $memStatus')),
       );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Clean failed: $e')),
+          SnackBar(content: Text('Recap failed: $e')),
         );
       }
     } finally {
@@ -404,19 +526,24 @@ class _HomePageState extends State<HomePage> {
     if (!_connected) {
       return 'Off';
     }
-    if (!_armed) {
-      return 'Connected';
+    if (_noteHolding) {
+      return 'Note';
     }
-    if (_sttBusy || _sttQueue.isNotEmpty) {
-      return 'Catching up';
+    if (_armed) {
+      return 'Meeting ${_meetingElapsed()}';
     }
-    if (_dbg?.imuSleep == true) {
-      return 'Resting';
+    return 'Idle';
+  }
+
+  String _meetingElapsed() {
+    final start = _meetingStartedAt;
+    if (start == null) {
+      return '';
     }
-    if (_dbg?.micRunning == true) {
-      return 'Listening';
-    }
-    return 'Armed';
+    final d = DateTime.now().difference(start);
+    final m = d.inMinutes.clamp(0, 99 * 60);
+    final s = d.inSeconds.remainder(60);
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   Future<bool> _blePerms() async {
@@ -447,7 +574,7 @@ class _HomePageState extends State<HomePage> {
         _connected = true;
         _autoReconnect = false;
         _status =
-            'Connected to ${d.platformName}. Record arms capture; LED stays solid while armed.';
+            'Connected to ${d.platformName}. Click starts a meeting; hold the button for a note.';
       });
     } catch (e) {
       if (mounted) {
@@ -469,6 +596,7 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _connected = false;
       _dbg = null;
+      _btnSeqPrimed = false;
       _status = 'Connection lost. Reconnecting…';
     });
     Future(() async {
@@ -556,7 +684,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _toggleRecord() async {
+  Future<void> _toggleMeeting() async {
+    if (_busy || !_connected) {
+      return;
+    }
     if (_armed) {
       await _disarm(flush: true, keepSession: false);
     } else {
@@ -572,7 +703,15 @@ class _HomePageState extends State<HomePage> {
       if (!resumeSession || _sessionId == null) {
         _sessionId = const Uuid().v4();
         _seq = 0;
+        _meetingStartedAt = DateTime.now();
+        await _store.startMeeting(
+          MeetingRecord(
+            id: _sessionId!,
+            startedAt: DateTime.now().toUtc(),
+          ),
+        );
       }
+      _meetingStartedAt ??= DateTime.now();
       _chunkStartedAt = DateTime.now().toUtc();
       _lastSpeechAt = DateTime.now();
       _lastPcmAt = DateTime.now();
@@ -603,13 +742,13 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() => _bytes = _ble.reassembler.pcmByteLength);
     _syncDev();
-    if (_ble.reassembler.pcmByteLength >= _maxChunkBytes) {
+    if (!_noteHolding && _ble.reassembler.pcmByteLength >= _maxChunkBytes) {
       Future.microtask(() => _rotateChunk());
     }
   }
 
   void _onArmTick() {
-    if (!_armed || _rotating) {
+    if (!_armed || _rotating || _noteHolding) {
       return;
     }
     final now = DateTime.now();
@@ -645,7 +784,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _rotateChunk() async {
-    if (!_armed || _rotating) {
+    if (!_armed || _rotating || _noteHolding) {
       return;
     }
     _rotating = true;
@@ -695,6 +834,10 @@ class _HomePageState extends State<HomePage> {
   Future<void> _disarm({required bool flush, required bool keepSession}) async {
     _armTick?.cancel();
     _armTick = null;
+    if (_noteHolding) {
+      _noteHolding = false;
+      await _endButtonNote();
+    }
     while (_rotating) {
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
@@ -733,14 +876,18 @@ class _HomePageState extends State<HomePage> {
       }
       await _ble.stopRecording();
       if (!keepSession) {
+        if (_sessionId != null) {
+          await _store.endMeeting(_sessionId!);
+        }
         _sessionId = null;
         _seq = 0;
+        _meetingStartedAt = null;
       }
       if (mounted) {
         setState(() {
           _status = keepSession
               ? 'Chunk flushed. Reconnecting…'
-              : 'Disarmed. Notify off.';
+              : 'Meeting ended.';
         });
       }
     } catch (e) {
@@ -829,15 +976,28 @@ class _HomePageState extends State<HomePage> {
     required SpeechExtract speech,
   }) async {
     try {
-      return (
-        result: await _saaras.transcribe(
-          wav: wav,
-          apiKey: apiKey,
-          startedAt: startedAt,
-          speech: speech,
-        ),
-        error: null,
+      var result = await _saaras.transcribe(
+        wav: wav,
+        apiKey: apiKey,
+        startedAt: startedAt,
+        speech: speech,
       );
+      try {
+        result = await LocalSpeaker.tagTranscript(
+          wav: wav,
+          transcript: result,
+          speech: speech,
+        );
+      } catch (e) {
+        debugPrint('local speaker: $e');
+      }
+      final named =
+          result.segments.any((s) => (s.speaker ?? '').trim().isNotEmpty);
+      final voices = await VoiceStore.list();
+      if (!named && voices.length == 1) {
+        result = applySaarasVoiceTags(result, voices);
+      }
+      return (result: result, error: null);
     } catch (e) {
       return (result: null, error: e);
     }
@@ -845,25 +1005,25 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _transcribeClip(ClipRecord clip) async {
     await SttPrefs.load();
+    final buttonNote = _buttonNoteIds.contains(clip.id);
     final wavPath = clip.wavPath;
     final openaiKey = await ApiKeyStore.read();
     final sarvamKey = await SarvamKeyStore.read();
     final needOpenAi = !SttPrefs.useSaarasOnly;
     final needSarvam = SttPrefs.useSaaras;
     if (wavPath == null || !File(wavPath).existsSync()) {
+      _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
       return;
     }
     if ((needOpenAi && openaiKey.isEmpty) || (needSarvam && sarvamKey.isEmpty)) {
+      _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
-      if (mounted && !_armed) {
-        final missing = [
-          if (needOpenAi && openaiKey.isEmpty) 'OpenAI',
-          if (needSarvam && sarvamKey.isEmpty) 'Sarvam',
-        ].join(' and ');
-        setState(() => _status =
-            'Saved WAV but no $missing API key. Add it in Settings, then Retry.');
-      }
+      final missing = [
+        if (needOpenAi && openaiKey.isEmpty) 'OpenAI',
+        if (needSarvam && sarvamKey.isEmpty) 'Sarvam',
+      ].join(' and ');
+      _toastSttFailed('No $missing API key. Add it in Settings.');
       return;
     }
 
@@ -875,9 +1035,29 @@ class _HomePageState extends State<HomePage> {
     final speech = extractSpeech(
       pcm,
       energyFloor: VadGate.energyFloor,
-      minSpeechS: VadGate.minSpeechS,
+      minSpeechS: buttonNote ? 0.12 : VadGate.minSpeechS,
     );
-    if (speech.speechDurationS < VadGate.minSpeechS) {
+    if (speech.speechDurationS < (buttonNote ? 0.12 : VadGate.minSpeechS)) {
+      if (buttonNote) {
+        _buttonNoteIds.remove(clip.id);
+        await _store.upsertClip(
+          clip.copyWith(
+            status: 'note',
+            billedS: 0,
+            removedS: speech.originalDurationS,
+            costUsd: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            clearAlt: true,
+          ),
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No speech in that note.')),
+          );
+        }
+        return;
+      }
       await _store.upsertClip(
         clip.copyWith(
           status: 'silence',
@@ -917,7 +1097,7 @@ class _HomePageState extends State<HomePage> {
         final o = await openaiF;
         openai = o.result;
         openaiErr = o.error;
-        if (openai != null && _sttHasText(openai)) {
+        if (!buttonNote && openai != null && _sttHasText(openai)) {
           cursorKickoff = _maybeCursorCommand(
             segs: _sttSegs(openai),
             fullText: openai.text,
@@ -952,6 +1132,9 @@ class _HomePageState extends State<HomePage> {
           ? openai
           : (saarasOk ? saaras : openai ?? saaras);
       if (primary == null || !_sttHasText(primary)) {
+        if (buttonNote) {
+          _buttonNoteIds.remove(clip.id);
+        }
         if (openaiErr != null || saarasErr != null) {
           throw openaiErr ?? saarasErr!;
         }
@@ -972,6 +1155,50 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      if (buttonNote) {
+        _buttonNoteIds.remove(clip.id);
+        final text = primary.text.trim();
+        await _store.upsertClip(
+          clip.copyWith(
+            fullText: '',
+            sttModel: primary.model,
+            status: 'note',
+            segments: const [],
+            billedS: speech.speechDurationS,
+            removedS: speech.originalDurationS - speech.speechDurationS,
+            inputTokens: openai?.inputTokens ?? 0,
+            outputTokens: openai?.outputTokens ?? 0,
+            costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+            clearAlt: true,
+          ),
+        );
+        if (text.isNotEmpty) {
+          await _store.insertNote(
+            SpokenNote(
+              id: const Uuid().v4(),
+              createdAt: clip.startedAt,
+              text: text,
+              clipId: clip.id,
+              meetingId: _buttonNoteMeetingIds.remove(clip.id),
+            ),
+          );
+          await _reload();
+          if (mounted) {
+            final preview =
+                text.length > 80 ? '${text.substring(0, 80)}…' : text;
+            final msg = 'Note saved: $preview';
+            setState(() => _status = msg);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                duration: const Duration(seconds: 6),
+                content: Text(msg),
+              ),
+            );
+          }
+        }
+        return;
+      }
+
       TranscriptResult? alt;
       var altError = '';
       if (SttPrefs.useBoth && openaiOk && saarasOk) {
@@ -982,22 +1209,31 @@ class _HomePageState extends State<HomePage> {
         altError = openaiErr?.toString() ?? 'OpenAI returned no text';
       }
 
+      final primarySegs = _sttSegs(primary);
+      final journalSegs = segsWithoutNoteCommands(primarySegs);
+      final journalText = joinSegmentText(journalSegs);
+      final journalOk = journalSegs.isNotEmpty && journalText.isNotEmpty;
+      final altSegs = alt == null
+          ? const <TranscriptSegment>[]
+          : segsWithoutNoteCommands(_sttSegs(alt));
+      final altText = joinSegmentText(altSegs);
+
       await _store.upsertClip(
         clip.copyWith(
-          fullText: primary.text,
+          fullText: journalText,
           sttModel: primary.model,
-          status: 'ok',
-          segments: _sttSegs(primary),
+          status: journalOk ? 'ok' : 'note',
+          segments: journalSegs,
           billedS: speech.speechDurationS,
           removedS: speech.originalDurationS - speech.speechDurationS,
           inputTokens: openai?.inputTokens ?? 0,
           outputTokens: openai?.outputTokens ?? 0,
           costUsd: primary.costUsd,
-          altFullText: alt?.text ?? '',
+          altFullText: alt == null ? '' : altText,
           altSttModel: alt?.model,
           altCostUsd: alt?.costUsd ?? 0,
           altError: altError,
-          altSegments: alt == null ? const [] : _sttSegs(alt),
+          altSegments: altSegs,
           clearAlt: !SttPrefs.useBoth,
         ),
       );
@@ -1015,11 +1251,24 @@ class _HomePageState extends State<HomePage> {
         clipId: clip.id,
       );
     } catch (e) {
+      _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
-      if (mounted && !_armed) {
-        setState(() => _status = 'WAV saved; STT failed: $e');
-      }
+      _toastSttFailed();
     }
+  }
+
+  void _toastSttFailed([String? message]) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Text(message ?? 'Transcription failed'),
+      ),
+    );
   }
 
   Future<void> _maybeCursorCommand({
@@ -1099,6 +1348,7 @@ class _HomePageState extends State<HomePage> {
           createdAt: DateTime.now().toUtc(),
           text: note,
           clipId: clipId,
+          meetingId: _armed ? _sessionId : null,
         ),
       );
     } catch (e) {
@@ -1133,6 +1383,7 @@ class _HomePageState extends State<HomePage> {
           id: const Uuid().v4(),
           createdAt: DateTime.now().toUtc(),
           text: text,
+          meetingId: _armed ? _sessionId : null,
         ),
       );
       _noteDraft.clear();
@@ -1150,23 +1401,6 @@ class _HomePageState extends State<HomePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not save note: $e')),
       );
-    }
-  }
-
-  Future<void> _retry(ClipRecord clip) async {
-    setState(() => _busy = true);
-    try {
-      await _store.upsertClip(clip.copyWith(status: 'transcribing'));
-      await _reload();
-      _enqueueStt(clip.copyWith(status: 'transcribing'));
-      while (_sttBusy || _sttQueue.isNotEmpty) {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      }
-      await _reload();
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
     }
   }
 
@@ -1395,40 +1629,81 @@ class _HomePageState extends State<HomePage> {
     await _reload();
   }
 
-  Future<void> _openScene(SceneGroup scene, {bool developer = false}) async {
-    final ids = {
-      for (final s in scene.segments)
-        if ((s.clipId ?? '').isNotEmpty) s.clipId!,
-    };
-    final clips = <ClipRecord>[];
-    for (final id in ids) {
-      final c = await _store.getClip(id);
-      if (c != null) {
-        clips.add(c);
-      }
-    }
+  Future<void> _openMeeting(MeetingRecord meeting, {bool developer = false}) async {
     if (!mounted) {
       return;
     }
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ClipPage.range(
-          segments: scene.segments,
-          clips: clips,
-          title: DateFormat.MMMd().add_jm().format(scene.startedAt.toLocal()),
+          segments: meeting.segments,
+          clips: meeting.clips,
+          title: meeting.timeRangeLabel(now: DateTime.now()),
           onRenameSpeaker: _renameSpeaker,
           showDeveloper: developer,
+          header: _meetingDetailHeader(meeting),
         ),
       ),
+    );
+    await _reload();
+  }
+
+  Widget _meetingDetailHeader(MeetingRecord meeting) {
+    final recap = meeting.recap;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (meeting.live || (_armed && meeting.id == _sessionId))
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text('Live meeting'),
+          ),
+        if (recap != null) ...[
+          Text(
+            recap.headline.isEmpty ? 'Recap' : recap.headline,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+          ),
+          if (recap.arc.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(recap.arc),
+          ],
+          const SizedBox(height: 12),
+        ],
+        FilledButton.tonalIcon(
+          onPressed: _cleaning ? null : () => _cleanMeeting(meeting),
+          icon: _cleaning
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.auto_fix_high),
+          label: Text(_cleaning ? 'Recapping…' : 'Recap this meeting'),
+        ),
+        if (meeting.notes.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          const Text('Notes in this meeting',
+              style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          for (final n in meeting.notes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text('• ${n.text}'),
+            ),
+        ],
+        const SizedBox(height: 8),
+        const Text('Transcript', style: TextStyle(fontWeight: FontWeight.w600)),
+      ],
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final recLabel = _armed ? 'Stop' : 'Record';
+    final recLabel = _armed ? 'End meeting' : 'Start meeting';
     final selected = _selectedDay;
-    final convosLabel =
-        'Conversations · ${DateFormat.MMMd().format(selected)}';
+    final meetingsLabel =
+        'Meetings · ${DateFormat.MMMd().format(selected)}';
+    final meetingById = {for (final m in _meetings) m.id: m};
     return Scaffold(
       appBar: AppBar(
         title: const Text('OpenPendant'),
@@ -1495,11 +1770,9 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       Chip(
                         avatar: Icon(
-                          _armed
-                              ? (_dbg?.imuSleep == true
-                                  ? Icons.hotel
-                                  : Icons.graphic_eq)
-                              : Icons.power_settings_new,
+                          _noteHolding
+                              ? Icons.edit_note
+                              : (_armed ? Icons.groups : Icons.power_settings_new),
                           size: 18,
                         ),
                         label: Text(_wearerLabel()),
@@ -1527,7 +1800,7 @@ class _HomePageState extends State<HomePage> {
                         child: Text(_ble.device != null ? 'Reconnect' : 'Connect'),
                       ),
                       FilledButton.tonal(
-                        onPressed: _busy || !_connected ? null : _toggleRecord,
+                        onPressed: _busy || !_connected ? null : _toggleMeeting,
                         child: Text(recLabel),
                       ),
                       OutlinedButton(
@@ -1572,31 +1845,6 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                  child: Row(
-                    children: [
-                      FilledButton.tonalIcon(
-                        onPressed: _busy || _cleaning ? null : _cleanDay,
-                        icon: _cleaning
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.auto_fix_high),
-                        label: Text(
-                          _cleaning ? 'Cleaning day…' : 'Clean this day',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                DayRecapCard(
-                  day: selected,
-                  recap: _dayRecap,
-                  stale: _recapStale,
-                ),
-                Padding(
                   padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
                   child: Text(
                     'Notes · ${DateFormat.MMMd().format(selected)}',
@@ -1611,7 +1859,7 @@ class _HomePageState extends State<HomePage> {
                         child: TextField(
                           controller: _noteDraft,
                           decoration: const InputDecoration(
-                            hintText: 'Type a note, or say “take a note, …”',
+                            hintText: 'Hold the button to talk, or type a note',
                             border: OutlineInputBorder(),
                             isDense: true,
                           ),
@@ -1629,7 +1877,7 @@ class _HomePageState extends State<HomePage> {
                 if (_notes.isEmpty)
                   const Padding(
                     padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: Text('No notes this day.'),
+                    child: Text('No notes this day. Hold the pendant button to capture one.'),
                   )
                 else
                   for (final n in _notes)
@@ -1637,9 +1885,7 @@ class _HomePageState extends State<HomePage> {
                       margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                       child: ListTile(
                         title: Text(n.text),
-                        subtitle: Text(
-                          DateFormat.jm().format(n.createdAt.toLocal()),
-                        ),
+                        subtitle: Text(_noteSubtitle(n, meetingById)),
                         trailing: IconButton(
                           tooltip: 'Delete',
                           icon: const Icon(Icons.close),
@@ -1651,9 +1897,9 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 0),
                   child: Text(
-                    convosLabel,
+                    meetingsLabel,
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
@@ -1662,7 +1908,7 @@ class _HomePageState extends State<HomePage> {
                   child: TextField(
                     controller: _search,
                     decoration: const InputDecoration(
-                      hintText: 'Search this day',
+                      hintText: 'Search notes and meetings',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.search),
                     ),
@@ -1670,25 +1916,15 @@ class _HomePageState extends State<HomePage> {
                     onChanged: (_) => _reload(),
                   ),
                 ),
-                for (final err in _errorClips)
-                  ListTile(
-                    leading: const Icon(Icons.error_outline),
-                    title: const Text('Transcription failed'),
-                    subtitle: Text(DateFormat.jm().format(err.startedAt.toLocal())),
-                    trailing: TextButton(
-                      onPressed: _busy ? null : () => _retry(err),
-                      child: const Text('Retry'),
-                    ),
-                  ),
               ],
             ),
           ),
-          if (_scenes.isEmpty)
+          if (_meetings.isEmpty)
             const SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.all(24),
                 child: Text(
-                  'No conversations on this day yet.',
+                  'No meetings this day. Click the pendant button or Start meeting.',
                 ),
               ),
             )
@@ -1696,31 +1932,73 @@ class _HomePageState extends State<HomePage> {
             SliverList(
               delegate: SliverChildBuilderDelegate(
                 (context, i) {
-                  final scene = _scenes[i];
-                  final people = scene.displaySpeakers.join(', ');
+                  final meeting = _meetings[i];
+                  final people = meeting.displaySpeakers.join(', ');
+                  final live = _armed && meeting.id == _sessionId;
                   return Card(
                     margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-                    child: ListTile(
-                      isThreeLine: true,
-                      title: Text(scene.timeRangeLabel()),
-                      subtitle: Text(
-                        [
-                          if (people.isNotEmpty) people,
-                          scene.preview,
-                        ].join('\n'),
-                        maxLines: 4,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      onTap: () => _openScene(scene),
-                      onLongPress: () => _openScene(scene, developer: true),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        ListTile(
+                          isThreeLine: true,
+                          title: Text(
+                            [
+                              if (live) 'Live · ',
+                              meeting.timeRangeLabel(now: DateTime.now()),
+                            ].join(),
+                          ),
+                          subtitle: Text(
+                            [
+                              if (people.isNotEmpty) people,
+                              if (meeting.notes.isNotEmpty)
+                                '${meeting.notes.length} note${meeting.notes.length == 1 ? '' : 's'}',
+                              meeting.preview.isEmpty
+                                  ? 'No transcript yet'
+                                  : meeting.preview,
+                            ].join('\n'),
+                            maxLines: 4,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => _openMeeting(meeting),
+                          onLongPress: () =>
+                              _openMeeting(meeting, developer: true),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: _busy || _cleaning
+                                  ? null
+                                  : () => _cleanMeeting(meeting),
+                              icon: const Icon(Icons.auto_fix_high, size: 18),
+                              label: Text(
+                                meeting.recap == null
+                                    ? 'Recap'
+                                    : 'Refresh recap',
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   );
                 },
-                childCount: _scenes.length,
+                childCount: _meetings.length,
               ),
             ),
         ],
       ),
     );
+  }
+
+  String _noteSubtitle(SpokenNote n, Map<String, MeetingRecord> meetings) {
+    final when = DateFormat.jm().format(n.createdAt.toLocal());
+    final m = n.meetingId == null ? null : meetings[n.meetingId!];
+    if (m == null) {
+      return when;
+    }
+    return '$when · in ${SceneGroup.clock(m.startedAt.toLocal())} meeting';
   }
 }

@@ -155,7 +155,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _stt == SttPrefs.both
                 ? 'Each clip is sent to OpenAI and Saaras v4. Journal, Clean, and Memories use OpenAI when it succeeds. Open a conversation to compare side by side. Both API keys required. About 2× STT cost.'
                 : _stt == SttPrefs.saarasV4
-                    ? 'Saaras v4 REST for Indic transcription. No speaker names on REST. Journal uses Saaras only.'
+                    ? 'Saaras v4 for Indic text. A small on-device speaker model (first download ~25 MB) tags People from their voice samples. OpenAI is not used for those names.'
                     : 'OpenAI file transcription. Named voices use gpt-4o-transcribe-diarize.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
@@ -284,7 +284,8 @@ class _SettingsPageState extends State<SettingsPage> {
             contentPadding: EdgeInsets.zero,
             title: const Text('Spoken notes'),
             subtitle: const Text(
-              'Say “take a note, …” to save a note on Home for that day. You can also type one. Nothing is sent to Google.',
+              'Hold the pendant button (~0.7s) and talk; release to save. '
+              'A click starts or ends a meeting. You can still say “take a note, …” or type one on Home.',
             ),
             value: _notesOn,
             onChanged: !_loaded
@@ -315,8 +316,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           const Text(
-            'Named voices are on the People screen. '
-            'Samples stay on this computer and are sent with OpenAI diarized transcription.',
+            'Named voices are on the People screen. A local speaker model matches those samples; Saaras only transcribes.'
           ),
         ],
         ),

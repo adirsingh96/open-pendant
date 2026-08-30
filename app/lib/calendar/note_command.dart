@@ -13,7 +13,42 @@ final _mid = RegExp(
   dotAll: true,
 );
 
-/// Spoken text after “take a note …”. Journal is unchanged.
+/// Journal leftover after removing a “take a note” command, or empty to drop.
+String leftoverAfterNoteCommand(String text) {
+  var t = text.trim();
+  if (t.isEmpty) {
+    return '';
+  }
+  t = t.replaceAll(RegExp(r'\s+'), ' ');
+  if (_start.hasMatch(t)) {
+    return '';
+  }
+  final mid = _mid.firstMatch(t);
+  if (mid == null) {
+    return t;
+  }
+  return t.substring(0, mid.start).trim();
+}
+
+List<TranscriptSegment> segsWithoutNoteCommands(List<TranscriptSegment> segs) {
+  final out = <TranscriptSegment>[];
+  for (final s in segs) {
+    final left = leftoverAfterNoteCommand(s.text);
+    if (left.isEmpty) {
+      continue;
+    }
+    out.add(s.copyWith(text: left, rawText: left));
+  }
+  return out;
+}
+
+String joinSegmentText(List<TranscriptSegment> segs) {
+  return segs
+      .map((s) => s.labeledText)
+      .where((t) => t.trim().isNotEmpty)
+      .join(' ')
+      .trim();
+}
 String? calendarNoteFromText(String text) {
   var t = text.trim();
   if (t.isEmpty) {

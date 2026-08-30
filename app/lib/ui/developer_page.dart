@@ -17,6 +17,8 @@ class DeveloperLive extends ChangeNotifier {
   int totalInTok = 0;
   int totalOutTok = 0;
   List<TranscriptSegment> segments = const [];
+  final List<String> buttonLog = [];
+  int _seenBtnSeq = 0;
 
   DateTime? _lastNotify;
 
@@ -43,6 +45,17 @@ class DeveloperLive extends ChangeNotifier {
     this.totalInTok = totalInTok;
     this.totalOutTok = totalOutTok;
     this.segments = segments;
+    if (dbg != null && dbg.buttonSeq != 0 && dbg.buttonSeq != _seenBtnSeq) {
+      _seenBtnSeq = dbg.buttonSeq;
+      buttonLog.insert(
+        0,
+        '${DateFormat.Hms().format(DateTime.now())}  ${dbg.buttonLabel}',
+      );
+      if (buttonLog.length > 24) {
+        buttonLog.removeLast();
+      }
+      force = true;
+    }
     final now = DateTime.now();
     if (!force &&
         _lastNotify != null &&
@@ -127,8 +140,28 @@ class DeveloperPage extends StatelessWidget {
                 ),
               ],
               const SizedBox(height: 8),
+              Text('Button (D10)', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 4),
               const Text(
-                'Armed: LED stays solid. Sit still ~10s → IMU SLEEP cuts a chunk '
+                'Click starts or ends a meeting (red). Hold ~0.7s for a note (blue). '
+                'COM to GND, NO to pin 10. Serial: BTN single / long-down / long-up.',
+              ),
+              const SizedBox(height: 8),
+              if (s != null)
+                Text(
+                  s.buttonSeq == 0
+                      ? 'Last: none yet'
+                      : 'Last: ${s.buttonLabel}  (seq ${s.buttonSeq})',
+                ),
+              if (live.buttonLog.isEmpty)
+                const Text('Press the switch to log events here.')
+              else
+                for (final line in live.buttonLog.take(12))
+                  Text(line, style: Theme.of(context).textTheme.bodyMedium),
+              const SizedBox(height: 8),
+              const Text(
+                'Idle: slow green blink. Meeting: solid red. Note hold: blue '
+                '(purple if a meeting is already on). Sit still ~10s → IMU SLEEP cuts a chunk '
                 '(no OpenAI if quiet). Move and talk → next chunk. '
                 'Lines below are raw STT plus cleaned text, live as chunks finish.',
               ),

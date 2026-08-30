@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:openpendant/db/models.dart';
 import 'package:openpendant/stt/saaras_stt.dart';
 import 'package:openpendant/stt/stt_pricing.dart';
+import 'package:openpendant/stt/voice_store.dart';
 
 void main() {
   test('parseSaarasTranscript uses diarized entries', () {
@@ -55,6 +56,58 @@ void main() {
     expect(r.segments, hasLength(2));
     expect(r.segments[0].speaker, isNull);
     expect(r.segments[1].text, 'there');
+  });
+
+  test('applySaarasVoiceTags uses enrolled names', () {
+    final unlabeled = parseSaarasTranscript(
+      json: {
+        'transcript': 'Hi there',
+        'timestamps': {
+          'words': ['Hi'],
+          'start_time_seconds': [0.0],
+          'end_time_seconds': [0.3],
+        },
+      },
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      billedSeconds: 1,
+    );
+    final tagged = applySaarasVoiceTags(unlabeled, [
+      VoiceProfile(id: '1', name: 'Aditya', wavPath: '/tmp/a.wav'),
+    ]);
+    expect(tagged.segments.single.speaker, 'Aditya');
+    expect(tagged.text, startsWith('Aditya:'));
+
+    final diar = parseSaarasTranscript(
+      json: {
+        'transcript': 'A B',
+        'diarized_transcript': {
+          'entries': [
+            {
+              'transcript': 'A',
+              'start_time_seconds': 0,
+              'end_time_seconds': 1,
+              'speaker_id': '0',
+            },
+            {
+              'transcript': 'B',
+              'start_time_seconds': 1,
+              'end_time_seconds': 2,
+              'speaker_id': '1',
+            },
+          ],
+        },
+      },
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      billedSeconds: 2,
+    );
+    final named = applySaarasVoiceTags(diar, [
+      VoiceProfile(id: '1', name: 'Aditya', wavPath: '/tmp/a.wav'),
+      VoiceProfile(id: '2', name: 'Sushma', wavPath: '/tmp/b.wav'),
+    ]);
+    expect(named.segments[0].speaker, 'Aditya');
+    expect(named.segments[1].speaker, 'Sushma');
   });
 
   test('saarasSpeakerLabel maps SPEAKER_00', () {

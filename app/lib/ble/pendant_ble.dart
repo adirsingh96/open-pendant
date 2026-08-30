@@ -19,6 +19,9 @@ class PendantStatus {
     required this.batteryMv,
     required this.usbPowered,
     required this.updatedAt,
+    this.buttonEvent = 0,
+    this.buttonSeq = 0,
+    this.noteHeld = false,
   });
 
   final bool imuSleep;
@@ -30,6 +33,24 @@ class PendantStatus {
   final int? batteryMv;
   final bool usbPowered;
   final DateTime updatedAt;
+  final int buttonEvent;
+  final int buttonSeq;
+  final bool noteHeld;
+
+  String get buttonLabel {
+    switch (buttonEvent) {
+      case 1:
+        return 'single press';
+      case 2:
+        return 'double press';
+      case 3:
+        return 'long press';
+      case 4:
+        return 'long release';
+      default:
+        return 'none';
+    }
+  }
 
   /// Resting 1S LiPo estimate. Invalid on USB — the charger rail is ~4.1 V
   /// even with no cell attached.
@@ -92,6 +113,9 @@ class PendantStatus {
       batteryMv: batteryMv,
       usbPowered: (flags & 16) != 0,
       updatedAt: DateTime.now(),
+      buttonEvent: data.length >= 8 ? data[6] : 0,
+      buttonSeq: data.length >= 8 ? data[7] : 0,
+      noteHeld: (flags & 32) != 0,
     );
   }
 }

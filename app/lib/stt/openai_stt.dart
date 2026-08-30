@@ -10,15 +10,41 @@ import '../db/models.dart';
 import 'stt_pricing.dart';
 import 'voice_store.dart';
 
+bool isTransientSttError(Object e) {
+  if (e is SocketException ||
+      e is HttpException ||
+      e is HandshakeException ||
+      e is TlsException) {
+    return true;
+  }
+  final s = e.toString().toLowerCase();
+  return s.contains('connection reset') ||
+      s.contains('connection closed') ||
+      s.contains('broken pipe') ||
+      s.contains('connection abort') ||
+      s.contains('timed out') ||
+      s.contains('timeout') ||
+      s.contains('network is unreachable') ||
+      s.contains('failed host lookup') ||
+      s.contains('connection refused');
+}
+
 class OpenAiStt {
-  OpenAiStt({http.Client? client}) : _client = client ?? http.Client();
+  OpenAiStt(
+      {http.Client? client,
+      this.retryPause = const Duration(milliseconds: 500)})
+      : _ownsClient = client == null,
+        _client = client ?? http.Client();
 
   static const _url = 'https://api.openai.com/v1/audio/transcriptions';
   static const _scriptPrompt =
       'Speakers mix Hindi and English. Write Hindi in Devanagari script. '
       'Write English in Latin letters. Never use Urdu or Arabic script.';
+  static const _maxAttempts = 3;
 
-  final http.Client _client;
+  final bool _ownsClient;
+  final Duration retryPause;
+  http.Client _client;
 
   Future<TranscriptResult> transcribe({
     required File wav,
@@ -89,41 +115,33 @@ class OpenAiStt {
     SpeechExtract? speech,
     List<VoiceProfile> voices = const [],
   }) async {
-    final req = http.MultipartRequest('POST', Uri.parse(_url));
-    req.headers['Authorization'] = 'Bearer $apiKey';
-    req.fields['model'] = model;
-    final diarize = model.contains('diarize');
-    if (diarize) {
-      req.fields['response_format'] = 'diarized_json';
-      req.fields['chunking_strategy'] = 'auto';
-      for (final v in voices) {
-        req.files.add(http.MultipartFile.fromString('known_speaker_names[]', v.name));
-        req.files.add(
-          http.MultipartFile.fromString(
-            'known_speaker_references[]',
-            await VoiceStore.dataUrl(v),
-          ),
+    Object? lastError;
+    Map<String, dynamic>? json;
+    for (var attempt = 0; attempt < _maxAttempts; attempt++) {
+      try {
+        json = await _postTranscription(
+          wav: wav,
+          apiKey: apiKey,
+          model: model,
+          voices: voices,
         );
-      }
-    } else if (model == 'whisper-1') {
-      req.fields['language'] = 'hi';
-      req.fields['response_format'] = 'verbose_json';
-      req.fields['timestamp_granularities[]'] = 'segment';
-    } else {
-      req.fields['response_format'] = 'json';
-      req.fields['prompt'] = _scriptPrompt;
-      if (model == 'gpt-transcribe') {
-        req.files.add(http.MultipartFile.fromString('languages[]', 'hi'));
-        req.files.add(http.MultipartFile.fromString('languages[]', 'en'));
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        if (!isTransientSttError(e) || attempt == _maxAttempts - 1) {
+          rethrow;
+        }
+        debugPrint('STT $model attempt ${attempt + 1} failed: $e');
+        _recycleClient();
+        if (retryPause > Duration.zero) {
+          await Future<void>.delayed(retryPause * (attempt + 1));
+        }
       }
     }
-    req.files.add(await http.MultipartFile.fromPath('file', wav.path));
-    final streamed = await _client.send(req).timeout(const Duration(seconds: 120));
-    final body = await streamed.stream.bytesToString();
-    if (streamed.statusCode >= 400) {
-      throw Exception('$model ${streamed.statusCode}: $body');
+    if (json == null) {
+      throw lastError ?? Exception('OpenAI transcription failed');
     }
-    final json = jsonDecode(body) as Map<String, dynamic>;
     var result = _parseResult(
       json: json,
       model: model,
@@ -149,6 +167,60 @@ class OpenAiStt {
     return result;
   }
 
+  void _recycleClient() {
+    if (!_ownsClient) {
+      return;
+    }
+    _client.close();
+    _client = http.Client();
+  }
+
+  Future<Map<String, dynamic>> _postTranscription({
+    required File wav,
+    required String apiKey,
+    required String model,
+    required List<VoiceProfile> voices,
+  }) async {
+    final req = http.MultipartRequest('POST', Uri.parse(_url));
+    req.persistentConnection = false;
+    req.headers['Authorization'] = 'Bearer $apiKey';
+    req.fields['model'] = model;
+    final diarize = model.contains('diarize');
+    if (diarize) {
+      req.fields['response_format'] = 'diarized_json';
+      req.fields['chunking_strategy'] = 'auto';
+      for (final v in voices) {
+        req.files.add(
+            http.MultipartFile.fromString('known_speaker_names[]', v.name));
+        req.files.add(
+          http.MultipartFile.fromString(
+            'known_speaker_references[]',
+            await VoiceStore.dataUrl(v),
+          ),
+        );
+      }
+    } else if (model == 'whisper-1') {
+      req.fields['language'] = 'hi';
+      req.fields['response_format'] = 'verbose_json';
+      req.fields['timestamp_granularities[]'] = 'segment';
+    } else {
+      req.fields['response_format'] = 'json';
+      req.fields['prompt'] = _scriptPrompt;
+      if (model == 'gpt-transcribe') {
+        req.files.add(http.MultipartFile.fromString('languages[]', 'hi'));
+        req.files.add(http.MultipartFile.fromString('languages[]', 'en'));
+      }
+    }
+    req.files.add(await http.MultipartFile.fromPath('file', wav.path));
+    final streamed =
+        await _client.send(req).timeout(const Duration(seconds: 120));
+    final body = await streamed.stream.bytesToString();
+    if (streamed.statusCode >= 400) {
+      throw Exception('$model ${streamed.statusCode}: $body');
+    }
+    return jsonDecode(body) as Map<String, dynamic>;
+  }
+
   TranscriptResult _parseResult({
     required Map<String, dynamic> json,
     required String model,
@@ -168,7 +240,8 @@ class OpenAiStt {
         TranscriptSegment(
           startS: origStart,
           endS: origEnd,
-          spokenAt: startedAt.add(Duration(milliseconds: (origStart * 1000).round())),
+          spokenAt:
+              startedAt.add(Duration(milliseconds: (origStart * 1000).round())),
           text: (m['text'] as String? ?? '').trim(),
           rawText: (m['text'] as String? ?? '').trim(),
           speaker: (m['speaker'] as String?)?.trim(),
@@ -195,10 +268,8 @@ class OpenAiStt {
         _usageSeconds(json) ??
         0;
     final usage = _parseUsage(json);
-    final labeled = segs
-        .map((s) => s.labeledText)
-        .where((t) => t.isNotEmpty)
-        .join(' ');
+    final labeled =
+        segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
     return TranscriptResult(
       text: labeled.isNotEmpty ? labeled : text,
       model: model,
@@ -274,10 +345,8 @@ class OpenAiStt {
         speaker: speaker ?? s.speaker,
       );
     }).toList();
-    final labeled = segs
-        .map((s) => s.labeledText)
-        .where((t) => t.isNotEmpty)
-        .join(' ');
+    final labeled =
+        segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
     return TranscriptResult(
       text: labeled.isNotEmpty ? labeled : text.text,
       model: '${from.model}+gpt-transcribe',

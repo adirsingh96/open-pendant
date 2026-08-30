@@ -38,6 +38,12 @@ K_MEM_SLAB_DEFINE_STATIC(rx_mem_slab, BLOCK_SIZE, 4, 4);
 const struct device *mic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
 const struct device *imu_dev = DEVICE_DT_GET(DT_NODELABEL(lsm6ds3tr_c));
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec led_green =
+	GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static const struct gpio_dt_spec led_blue =
+	GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+static const struct gpio_dt_spec user_btn =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(user_btn), gpios);
 
 static const struct bt_uuid_128 pendant_svc_uuid = BT_UUID_INIT_128(PENDANT_SVC_UUID_VAL);
 static const struct bt_uuid_128 pendant_pcm_uuid = BT_UUID_INIT_128(PENDANT_PCM_UUID_VAL);
@@ -60,11 +66,176 @@ static volatile bool ble_ok;
 static volatile bool pcm_notify_enabled;
 static volatile bool imu_sleep;
 static volatile bool status_notify_enabled;
-static uint8_t status_buf[6];
+static uint8_t status_buf[8];
+static int last_volume;
+static void led_set(const struct gpio_dt_spec *l, int on)
+{
+	if (gpio_is_ready_dt(l)) {
+		gpio_pin_set_dt(l, on);
+	}
+}
+
+static void note_led(bool on)
+{
+	led_set(&led_blue, on ? 1 : 0);
+}
+
 static void status_notify(int volume);
+static void mic_set_run(bool on);
 static struct bt_conn *current_conn;
 static uint16_t pcm_seq;
 static bool mic_running;
+
+#define BTN_EV_NONE     0
+#define BTN_EV_SINGLE   1
+#define BTN_EV_DOUBLE   2
+#define BTN_EV_LONG     3
+#define BTN_EV_LONG_UP  4
+#define BTN_STABLE_TICKS 3
+#define BTN_LONG_MS      700
+#define BTN_DOUBLE_MS    400
+
+static uint8_t btn_event;
+static uint8_t btn_seq;
+static bool btn_ok;
+static bool btn_raw;
+static bool btn_pressed;
+static uint8_t btn_same;
+static uint8_t btn_clicks;
+static bool btn_long_done;
+static bool btn_note_held;
+static int64_t btn_press_ms;
+static int64_t btn_release_ms;
+
+/* Idle: 250 ms green every 2 s. Red is only for an active meeting. */
+static void leds_update(void)
+{
+	if (pcm_notify_enabled || btn_note_held) {
+		led_set(&led_green, 0);
+		led_set(&led, pcm_notify_enabled ? 1 : 0);
+		return;
+	}
+	led_set(&led, 0);
+	led_set(&led_green, (k_uptime_get() % 2000) < 250 ? 1 : 0);
+}
+
+static void btn_emit(uint8_t ev)
+{
+	static const char *names[] = {
+		"none", "single", "double", "long-down", "long-up",
+	};
+
+	btn_event = ev;
+	btn_seq++;
+	if (btn_seq == 0) {
+		btn_seq = 1;
+	}
+	printk("BTN %s seq=%u\n",
+	       ev < ARRAY_SIZE(names) ? names[ev] : "?", btn_seq);
+	status_notify(last_volume);
+}
+
+static void btn_work_fn(struct k_work *work)
+{
+	bool raw;
+	int64_t now;
+
+	ARG_UNUSED(work);
+
+	if (!btn_ok) {
+		return;
+	}
+
+	raw = gpio_pin_get_dt(&user_btn) > 0;
+	now = k_uptime_get();
+
+	if (raw != btn_raw) {
+		btn_raw = raw;
+		btn_same = 1;
+	} else if (btn_same < 255) {
+		btn_same++;
+	}
+
+	if (btn_same == BTN_STABLE_TICKS && raw != btn_pressed) {
+		btn_pressed = raw;
+		if (btn_pressed) {
+			btn_press_ms = now;
+			btn_long_done = false;
+			if (btn_clicks == 1 &&
+			    (now - btn_release_ms) > BTN_DOUBLE_MS) {
+				btn_clicks = 0;
+			}
+		} else if (!btn_long_done) {
+			btn_release_ms = now;
+			btn_clicks++;
+			if (btn_clicks >= 2) {
+				btn_emit(BTN_EV_DOUBLE);
+				btn_clicks = 0;
+			}
+		} else {
+			btn_clicks = 0;
+			if (btn_note_held) {
+				btn_note_held = false;
+				note_led(false);
+				leds_update();
+				if (imu_sleep) {
+					mic_set_run(false);
+				}
+				btn_emit(BTN_EV_LONG_UP);
+			}
+		}
+	}
+
+	if (btn_pressed && !btn_long_done &&
+	    (now - btn_press_ms) >= BTN_LONG_MS) {
+		btn_long_done = true;
+		btn_clicks = 0;
+		btn_note_held = true;
+		mic_set_run(true);
+		note_led(true);
+		leds_update();
+		btn_emit(BTN_EV_LONG);
+	}
+
+	if (!btn_pressed && btn_clicks == 1 &&
+	    (now - btn_release_ms) >= BTN_DOUBLE_MS) {
+		btn_clicks = 0;
+		btn_emit(BTN_EV_SINGLE);
+	}
+}
+
+static K_WORK_DEFINE(btn_work, btn_work_fn);
+
+static void btn_timer_fn(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_work_submit(&btn_work);
+}
+
+static K_TIMER_DEFINE(btn_timer, btn_timer_fn, NULL);
+
+static void btn_setup(void)
+{
+	int err;
+
+	if (!gpio_is_ready_dt(&user_btn)) {
+		printk("Button D10 (P1.15) not ready\n");
+		return;
+	}
+	err = gpio_pin_configure_dt(&user_btn, GPIO_INPUT);
+	if (err) {
+		printk("Button D10 configure failed (%d)\n", err);
+		return;
+	}
+	btn_ok = true;
+	btn_raw = gpio_pin_get_dt(&user_btn) > 0;
+	btn_pressed = btn_raw;
+	btn_same = BTN_STABLE_TICKS;
+	btn_press_ms = k_uptime_get();
+	btn_long_done = btn_pressed;
+	k_timer_start(&btn_timer, K_MSEC(10), K_MSEC(10));
+	printk("Button D10 ready (NO→D10, COM→GND, internal pull-up)\n");
+}
 
 #define IMU_HIST 16
 #define IMU_STILL_STD_MM 80   /* mm/s^2; table noise is small, walk is hundreds */
@@ -175,7 +346,13 @@ static void imu_poll(int volume)
 	if (imu_still_hits < 255) {
 		imu_still_hits++;
 	}
+	if (pcm_notify_enabled) {
+		return;
+	}
 	if (!imu_sleep && imu_still_hits >= IMU_STILL_HITS) {
+		if (btn_note_held) {
+			return;
+		}
 		imu_sleep = true;
 		mic_set_run(false);
 		printk("IMU sleep (still var=%d)\n", var);
@@ -257,13 +434,17 @@ static void status_fill(int volume)
 	if (v > 65535) {
 		v = 65535;
 	}
+	last_volume = v;
 	status_buf[0] = (imu_sleep ? 1 : 0) | (mic_running ? 2 : 0) |
 			(device_is_ready(imu_dev) ? 4 : 0) |
 			(imu_fetch_ok ? 8 : 0) |
-			(nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ? 16 : 0);
+			(nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ? 16 : 0) |
+			(btn_note_held ? 32 : 0);
 	sys_put_le16((uint16_t)v, &status_buf[1]);
 	status_buf[3] = imu_still_hits;
 	sys_put_le16(battery_sample_mv(), &status_buf[4]);
+	status_buf[6] = btn_event;
+	status_buf[7] = btn_seq;
 }
 
 static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -285,9 +466,12 @@ static void pcm_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
 	pcm_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 	printk("PCM notify %s\n", pcm_notify_enabled ? "ON" : "OFF");
-	if (gpio_is_ready_dt(&led)) {
-		gpio_pin_set_dt(&led, pcm_notify_enabled ? 1 : 0);
+	if (pcm_notify_enabled) {
+		imu_sleep = false;
+		imu_still_hits = 0;
+		mic_set_run(true);
 	}
+	leds_update();
 }
 
 BT_GATT_SERVICE_DEFINE(pendant_svc,
@@ -333,7 +517,10 @@ static int pcm_notify_chunk(const uint8_t *pcm, size_t pcm_len)
 	size_t offset = 0;
 	int err = 0;
 
-	if (!pcm_notify_enabled || current_conn == NULL || imu_sleep) {
+	if (!pcm_notify_enabled || current_conn == NULL) {
+		return 0;
+	}
+	if (imu_sleep && !btn_note_held) {
 		return 0;
 	}
 
@@ -441,10 +628,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	printk("BLE disconnected (reason 0x%02x)\n", reason);
 	pcm_notify_enabled = false;
 	status_notify_enabled = false;
-
-	if (gpio_is_ready_dt(&led)) {
-		gpio_pin_set_dt(&led, 0);
-	}
+	btn_note_held = false;
+	note_led(false);
+	led_set(&led, 0);
+	led_set(&led_green, 0);
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);
@@ -527,11 +714,17 @@ int main(void)
 	unsigned int chunk = 0;
 	unsigned int sent = 0;
 	unsigned int dropped = 0;
-	bool led_on = false;
 
 	if (gpio_is_ready_dt(&led)) {
 		gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
 	}
+	if (gpio_is_ready_dt(&led_green)) {
+		gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
+	}
+	if (gpio_is_ready_dt(&led_blue)) {
+		gpio_pin_configure_dt(&led_blue, GPIO_OUTPUT_INACTIVE);
+	}
+	btn_setup();
 
 	printk("Booting OpenPendant (GATT PCM stream)...\n");
 
@@ -594,14 +787,11 @@ int main(void)
 	printk("Microphone is active. Subscribe to PCM notify to record.\n");
 
 	while (1) {
+		leds_update();
 		if (imu_sleep) {
 			imu_poll(0);
 			status_notify(0);
-			led_on = !led_on;
-			if (gpio_is_ready_dt(&led)) {
-				gpio_pin_set_dt(&led, led_on);
-			}
-			k_sleep(K_MSEC(200));
+			k_sleep(K_MSEC(50));
 			continue;
 		}
 
@@ -636,11 +826,6 @@ int main(void)
 			volume = samples ? (sum / samples) : 0;
 			imu_poll(volume);
 			status_notify(volume);
-
-			led_on = !led_on;
-			if (gpio_is_ready_dt(&led)) {
-				gpio_pin_set_dt(&led, pcm_notify_enabled ? 1 : led_on);
-			}
 
 			printk("Vol: %4d | bat=%umV notify=%d imu_sleep=%d imu_ok=%d still=%u sent=%u drop=%u seq=%u\n",
 			       volume, battery_mv, pcm_notify_enabled, imu_sleep, imu_fetch_ok,
