@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'macos/sandbox_migrate.dart';
 import 'ui/app_theme.dart';
@@ -8,6 +9,9 @@ import 'ui/home_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.isIOS || Platform.isMacOS) {
+    await FlutterBluePlus.setOptions(restoreState: true);
+  }
   await migrateMacosSandboxData();
   runApp(const OpenPendantApp());
 }

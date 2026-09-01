@@ -46,4 +46,52 @@ void main() {
     expect(m.first.text, 'hi there');
     expect(m.last.text, 'later');
   });
+
+  test('overlayDiarization keeps Saaras words and OpenAI speakers', () {
+    final t0 = DateTime.utc(2026, 8, 25);
+    final words = TranscriptResult(
+      text: 'hello there later',
+      model: 'saaras:v4',
+      segments: [
+        TranscriptSegment(
+          startS: 0,
+          endS: 1.0,
+          spokenAt: t0,
+          text: 'hello there',
+        ),
+        TranscriptSegment(
+          startS: 1.2,
+          endS: 2.0,
+          spokenAt: t0,
+          text: 'later',
+        ),
+      ],
+    );
+    final diarize = TranscriptResult(
+      text: 'Aditya: hi Sushma: bye',
+      model: 'gpt-4o-transcribe-diarize',
+      segments: [
+        TranscriptSegment(
+          startS: 0,
+          endS: 1.05,
+          spokenAt: t0,
+          text: 'hi',
+          speaker: 'Aditya',
+        ),
+        TranscriptSegment(
+          startS: 1.1,
+          endS: 2.1,
+          spokenAt: t0,
+          text: 'bye',
+          speaker: 'Sushma',
+        ),
+      ],
+    );
+    final out = overlayDiarization(words: words, diarize: diarize);
+    expect(out.segments, hasLength(2));
+    expect(out.segments[0].text, 'hello there');
+    expect(out.segments[0].speaker, 'Aditya');
+    expect(out.segments[1].text, 'later');
+    expect(out.segments[1].speaker, 'Sushma');
+  });
 }

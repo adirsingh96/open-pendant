@@ -10,14 +10,14 @@ flutter pub get
 flutter run -d macos
 ```
 
-On a phone, use a physical device (BLE does not work in the iOS simulator):
+On a phone, use a physical device (BLE does not work in the iOS simulator). A **debug** build cannot be opened from the Home Screen; use `flutter build ios --release` (or profile) for that. If Xcode says the bundle ID `com.openpendant.openpendant` is taken, set a unique id under **Signing & Capabilities** for your Personal Team (do not commit that id).
 
 ```bash
 flutter devices
 flutter run
 ```
 
-Paste API keys in **Settings**. Transcription can be **OpenAI** or **Saaras v4** (Sarvam batch + speaker labels). Clean this day and Memories still use OpenAI. Never put keys in firmware.
+Paste API keys in **Settings**. **Sarvam** is required for every transcript (Saaras v4). **OpenAI** is used for optional meeting diarization, recap, and ask-about-this-meeting. Toggle **Diarization** in Settings. Enrolled **People** samples are sent to OpenAI as speaker references; there is no on-device speaker model. Clean this day and Memories still use OpenAI. Never put keys in firmware.
 
 Disconnect nRF Connect first (the pendant allows one BLE connection).
 
@@ -43,6 +43,7 @@ This app disables Swift Package Manager in `pubspec.yaml` because `flutter_secur
 iOS `ios/Runner/Info.plist`:
 
 - `NSBluetoothAlwaysUsageDescription` / `NSBluetoothPeripheralUsageDescription`
+- `UIBackgroundModes`: `bluetooth-central` and `audio` so pendant buttons and capture still work when the phone is locked (leave the app in the switcher; a force-quit will not wake)
 
 Android `AndroidManifest.xml`:
 
@@ -52,7 +53,7 @@ Android `AndroidManifest.xml`:
 
 **Record** = arm: GATT notify on, LED solid, one session id. Capture keeps running until **Stop** or **Sleep**.
 
-Chunks rotate on IMU sleep, ~30 s of raw buffer, or quiet after speech. Each chunk is VAD-gated; silence is not sent to OpenAI. Home stitches session text and shows STT spend.
+Chunks rotate on IMU sleep, ~30 s of raw buffer, or quiet after speech. Each chunk is VAD-gated; silence is not sent to STT. After transcription succeeds or fails, clip WAV files are deleted. Home stitches session text and shows STT spend. While a clip is still in the STT queue, the meeting UI shows **Transcribing…** instead of an empty transcript.
 
 ## Mic calibrate
 
@@ -60,7 +61,7 @@ Chunks rotate on IMU sleep, ~30 s of raw buffer, or quiet after speech. Each chu
 
 ## Voices (speaker names)
 
-**Voices**: enroll up to 4 people (2–10 s sample + name). When voices exist, chunks use `gpt-4o-transcribe-diarize` with those references. Otherwise `gpt-transcribe` (Hindi + English hints; Devanagari for Hindi). Fallback: `gpt-4o-mini-transcribe`.
+**Voices**: enroll up to 4 people (2–10 s sample + name). When **Diarization** is on, meeting clips go to `gpt-4o-transcribe-diarize` with those references; speaker labels are stamped onto the Saaras transcript by time. Notes stay on Saaras only (no speaker prefix in the note text).
 
 ## IMU sleep debug
 

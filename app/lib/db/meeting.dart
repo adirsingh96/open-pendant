@@ -25,6 +25,13 @@ class MeetingRecord {
 
   bool get live => endedAt == null;
 
+  bool get hasSpokenText =>
+      segments.any((s) => s.text.trim().isNotEmpty);
+
+  bool get transcribing => clips.any(
+        (c) => c.status == 'transcribing' || c.status == 'refining',
+      );
+
   Duration durationAt(DateTime now) {
     final end = endedAt ?? now;
     final d = end.difference(startedAt);
@@ -56,6 +63,10 @@ class MeetingRecord {
   }
 
   String get preview {
+    final t = title.trim();
+    if (t.isNotEmpty) {
+      return t;
+    }
     final h = recap?.headline.trim() ?? '';
     if (h.isNotEmpty) {
       return h;

@@ -43,9 +43,9 @@ People should be able to build their own pendant from a short BOM, flash UF2, an
 *   **Consent:** enabling Notify is recording. The red LED stays on while notify is enabled.
 
 ## Transcription pipeline (host)
-**Record** arms notify once. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local spectral VAD (optional calibrated energy floor) must see enough speech before OpenAI. Text is stitched by `session_id` + `seq`.
+**Record** arms notify once. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local spectral VAD (optional calibrated energy floor) must see enough speech before STT. Text is stitched by `session_id` + `seq`. WAV files are deleted after STT.
 
-*   **STT:** `gpt-transcribe` (Hindi + English; Devanagari for Hindi). With enrolled voices: `gpt-4o-transcribe-diarize`. Fallback: `gpt-4o-mini-transcribe`. Key on the phone only.
+*   **STT:** Saaras v4 for words. Optional OpenAI `gpt-4o-transcribe-diarize` for who spoke (Settings toggle; People samples as references). Keys on the phone only.
 *   **clips:** `id`, `started_at`, `duration_s`, `full_text`, `wav_path`, `stt_model`, `status`, `session_id`, `seq`, billed/removed seconds, tokens, `cost_usd`
 *   **segments:** `start_s`, `end_s`, `spoken_at`, `text`, `speaker`
 *   Later sync (not built): [docs/sync_api.md](docs/sync_api.md)

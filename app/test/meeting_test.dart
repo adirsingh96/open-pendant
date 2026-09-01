@@ -37,5 +37,13 @@ void main() {
       segments: segs,
     );
     expect(plain.preview, contains('hello'));
+
+    final named = MeetingRecord(
+      id: 'm2',
+      startedAt: DateTime.utc(2026, 8, 29, 10),
+      title: 'Standup',
+      segments: segs,
+    );
+    expect(named.preview, 'Standup');
   });
 }

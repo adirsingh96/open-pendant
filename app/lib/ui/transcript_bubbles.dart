@@ -13,16 +13,23 @@ class TranscriptThread extends StatelessWidget {
     required this.segments,
     this.empty = 'Transcript will appear as speech is recognized.',
     this.dark = false,
+    this.pending = false,
+    this.pendingLabel = 'Transcribing…',
   });
 
   final List<TranscriptSegment> segments;
   final String empty;
   final bool dark;
+  final bool pending;
+  final String pendingLabel;
 
   @override
   Widget build(BuildContext context) {
     final segs = segments.where((s) => s.text.trim().isNotEmpty).toList();
     if (segs.isEmpty) {
+      if (pending) {
+        return _TranscriptPending(dark: dark, label: pendingLabel);
+      }
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24),
         child: Text(
@@ -37,7 +44,51 @@ class TranscriptThread extends StatelessWidget {
     return Column(
       children: [
         for (final s in segs) TranscriptBubble(segment: s, dark: dark),
+        if (pending)
+          _TranscriptPending(
+            dark: dark,
+            label: pendingLabel,
+            compact: true,
+          ),
       ],
+    );
+  }
+}
+
+class _TranscriptPending extends StatelessWidget {
+  const _TranscriptPending({
+    required this.dark,
+    required this.label,
+    this.compact = false,
+  });
+
+  final bool dark;
+  final String label;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = dark ? AppColors.onDarkMuted : AppColors.muted;
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: compact ? 12 : 28),
+      child: Column(
+        children: [
+          SizedBox(
+            width: compact ? 16 : 22,
+            height: compact ? 16 : 22,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppColors.accent,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            style: AppText.sub.copyWith(color: color, fontSize: 13),
+          ),
+        ],
+      ),
     );
   }
 }

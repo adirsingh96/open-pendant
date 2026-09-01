@@ -202,6 +202,16 @@ CREATE TABLE segments (
     });
   }
 
+  Future<void> clearWavPath(String id) async {
+    final db = await _open();
+    await db.update(
+      'clips',
+      {'wav_path': null},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<List<ClipRecord>> listClips({String query = ''}) async {
     final db = await _open();
     final q = query.trim();
@@ -550,11 +560,29 @@ CREATE TABLE IF NOT EXISTS notes (
     );
   }
 
+  Future<void> renameMeeting(String id, String title) async {
+    final db = await _open();
+    await db.update(
+      'meetings',
+      {'title': title.trim()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<void> upsertMeetingRecap({
     required String meetingId,
     required DayRecap recap,
   }) async {
     final db = await _open();
+    final rows = await db.query(
+      'meetings',
+      columns: ['title'],
+      where: 'id = ?',
+      whereArgs: [meetingId],
+    );
+    final existing =
+        rows.isEmpty ? '' : (rows.first['title'] as String? ?? '').trim();
     await db.update(
       'meetings',
       {
@@ -563,7 +591,8 @@ CREATE TABLE IF NOT EXISTS notes (
         'recap_cost_usd': recap.costUsd,
         'recap_updated_at':
             (recap.updatedAt ?? DateTime.now().toUtc()).toIso8601String(),
-        if (recap.headline.trim().isNotEmpty) 'title': recap.headline.trim(),
+        if (existing.isEmpty && recap.headline.trim().isNotEmpty)
+          'title': recap.headline.trim(),
       },
       where: 'id = ?',
       whereArgs: [meetingId],

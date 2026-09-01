@@ -25,11 +25,11 @@ import '../stt/api_key_store.dart';
 import '../stt/cursor_command.dart';
 import '../stt/cursor_prefs.dart';
 import '../macos/cursor_composer.dart';
-import '../stt/local_speaker.dart';
 import '../stt/openai_refine.dart';
 import '../stt/openai_stt.dart';
 import '../stt/saaras_stt.dart';
 import '../stt/sarvam_key_store.dart';
+import '../stt/speaker_spans.dart';
 import '../stt/stt_prefs.dart';
 import '../stt/voice_store.dart';
 import 'clip_page.dart';
@@ -1075,13 +1075,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _sttEngineLabel() {
-    if (SttPrefs.useBoth) {
-      return 'OpenAI+Saaras';
-    }
-    if (SttPrefs.useSaarasOnly) {
-      return 'Saaras v4';
-    }
-    return 'OpenAI';
+    return SttPrefs.diarize ? 'Saaras+diarize' : 'Saaras v4';
   }
 
   List<TranscriptSegment> _sttSegs(TranscriptResult result) {
@@ -1109,7 +1103,7 @@ class _HomePageState extends State<HomePage> {
           apiKey: apiKey,
           startedAt: startedAt,
           speech: speech,
-          fast: CursorPrefs.enabled || NotePrefs.enabled,
+          preferDiarize: true,
         ),
         error: null,
       );
@@ -1125,28 +1119,15 @@ class _HomePageState extends State<HomePage> {
     required SpeechExtract speech,
   }) async {
     try {
-      var result = await _saaras.transcribe(
-        wav: wav,
-        apiKey: apiKey,
-        startedAt: startedAt,
-        speech: speech,
-      );
-      try {
-        result = await LocalSpeaker.tagTranscript(
+      return (
+        result: await _saaras.transcribe(
           wav: wav,
-          transcript: result,
+          apiKey: apiKey,
+          startedAt: startedAt,
           speech: speech,
-        );
-      } catch (e) {
-        debugPrint('local speaker: $e');
-      }
-      final named =
-          result.segments.any((s) => (s.speaker ?? '').trim().isNotEmpty);
-      final voices = await VoiceStore.list();
-      if (!named && voices.length == 1) {
-        result = applySaarasVoiceTags(result, voices);
-      }
-      return (result: result, error: null);
+        ),
+        error: null,
+      );
     } catch (e) {
       return (result: null, error: e);
     }
@@ -1158,22 +1139,16 @@ class _HomePageState extends State<HomePage> {
     final wavPath = clip.wavPath;
     final openaiKey = await ApiKeyStore.read();
     final sarvamKey = await SarvamKeyStore.read();
-    final needOpenAi = !SttPrefs.useSaarasOnly;
-    final needSarvam = SttPrefs.useSaaras;
     if (wavPath == null || !File(wavPath).existsSync()) {
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
       return;
     }
-    if ((needOpenAi && openaiKey.isEmpty) ||
-        (needSarvam && sarvamKey.isEmpty)) {
+    try {
+    if (sarvamKey.isEmpty) {
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
-      final missing = [
-        if (needOpenAi && openaiKey.isEmpty) 'OpenAI',
-        if (needSarvam && sarvamKey.isEmpty) 'Sarvam',
-      ].join(' and ');
-      _toastSttFailed('No $missing API key. Add it in Settings.');
+      _toastSttFailed('No Sarvam API key. Add it in Settings.');
       return;
     }
 
@@ -1226,61 +1201,44 @@ class _HomePageState extends State<HomePage> {
     await File(speechPath)
         .writeAsBytes(pcmToWav(pcm: speech.speechPcm), flush: true);
     final wav = File(speechPath);
-    try {
       TranscriptResult? openai;
       TranscriptResult? saaras;
       Object? openaiErr;
       Object? saarasErr;
-      Future<void>? cursorKickoff;
-      if (SttPrefs.useBoth) {
-        final openaiF = _tryOpenai(
-          wav: wav,
-          apiKey: openaiKey,
-          startedAt: clip.startedAt,
-          speech: speech,
-        );
-        final saarasF = _trySaaras(
-          wav: wav,
-          apiKey: sarvamKey,
-          startedAt: clip.startedAt,
-          speech: speech,
-        );
+      final wantDiarize =
+          SttPrefs.diarize && !buttonNote && openaiKey.isNotEmpty;
+      final saarasF = _trySaaras(
+        wav: wav,
+        apiKey: sarvamKey,
+        startedAt: clip.startedAt,
+        speech: speech,
+      );
+      final openaiF = wantDiarize
+          ? _tryOpenai(
+              wav: wav,
+              apiKey: openaiKey,
+              startedAt: clip.startedAt,
+              speech: speech,
+            )
+          : null;
+      final s = await saarasF;
+      saaras = s.result;
+      saarasErr = s.error;
+      if (openaiF != null) {
         final o = await openaiF;
         openai = o.result;
         openaiErr = o.error;
-        if (!buttonNote && openai != null && _sttHasText(openai)) {
-          cursorKickoff = _maybeCursorCommand(
-            segs: _sttSegs(openai),
-            fullText: openai.text,
-          );
+        final openaiNamed = openai != null &&
+            openai.segments.any((x) => (x.speaker ?? '').trim().isNotEmpty);
+        if (saaras != null && openaiNamed) {
+          saaras = overlayDiarization(words: saaras, diarize: openai);
         }
-        final s = await saarasF;
-        saaras = s.result;
-        saarasErr = s.error;
-      } else if (SttPrefs.useSaarasOnly) {
-        final one = await _trySaaras(
-          wav: wav,
-          apiKey: sarvamKey,
-          startedAt: clip.startedAt,
-          speech: speech,
-        );
-        saaras = one.result;
-        saarasErr = one.error;
-      } else {
-        final one = await _tryOpenai(
-          wav: wav,
-          apiKey: openaiKey,
-          startedAt: clip.startedAt,
-          speech: speech,
-        );
-        openai = one.result;
-        openaiErr = one.error;
       }
 
       final openaiOk = openai != null && _sttHasText(openai);
       final saarasOk = saaras != null && _sttHasText(saaras);
       final TranscriptResult? primary =
-          openaiOk ? openai : (saarasOk ? saaras : openai ?? saaras);
+          saarasOk ? saaras : (openaiOk ? openai : openai ?? saaras);
       if (primary == null || !_sttHasText(primary)) {
         if (buttonNote) {
           _buttonNoteIds.remove(clip.id);
@@ -1307,7 +1265,12 @@ class _HomePageState extends State<HomePage> {
 
       if (buttonNote) {
         _buttonNoteIds.remove(clip.id);
-        final text = primary.text.trim();
+        final segs = _sttSegs(primary);
+        final text = noteTextWithoutSpeakers(
+          joinUnlabeledSegmentText(segs).isNotEmpty
+              ? joinUnlabeledSegmentText(segs)
+              : primary.text.trim(),
+        );
         await _store.upsertClip(
           clip.copyWith(
             fullText: '',
@@ -1338,24 +1301,10 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      TranscriptResult? alt;
-      var altError = '';
-      if (SttPrefs.useBoth && openaiOk && saarasOk) {
-        alt = saaras;
-      } else if (SttPrefs.useBoth && openaiOk && !saarasOk) {
-        altError = saarasErr?.toString() ?? 'Saaras returned no text';
-      } else if (SttPrefs.useBoth && !openaiOk && saarasOk) {
-        altError = openaiErr?.toString() ?? 'OpenAI returned no text';
-      }
-
       final primarySegs = _sttSegs(primary);
       final journalSegs = segsWithoutNoteCommands(primarySegs);
       final journalText = joinSegmentText(journalSegs);
       final journalOk = journalSegs.isNotEmpty && journalText.isNotEmpty;
-      final altSegs = alt == null
-          ? const <TranscriptSegment>[]
-          : segsWithoutNoteCommands(_sttSegs(alt));
-      final altText = joinSegmentText(altSegs);
 
       await _store.upsertClip(
         clip.copyWith(
@@ -1367,23 +1316,14 @@ class _HomePageState extends State<HomePage> {
           removedS: speech.originalDurationS - speech.speechDurationS,
           inputTokens: openai?.inputTokens ?? 0,
           outputTokens: openai?.outputTokens ?? 0,
-          costUsd: primary.costUsd,
-          altFullText: alt == null ? '' : altText,
-          altSttModel: alt?.model,
-          altCostUsd: alt?.costUsd ?? 0,
-          altError: altError,
-          altSegments: altSegs,
-          clearAlt: !SttPrefs.useBoth,
+          costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+          clearAlt: true,
         ),
       );
-      if (cursorKickoff != null) {
-        await cursorKickoff;
-      } else {
-        await _maybeCursorCommand(
-          segs: _sttSegs(primary),
-          fullText: primary.text,
-        );
-      }
+      await _maybeCursorCommand(
+        segs: _sttSegs(primary),
+        fullText: primary.text,
+      );
       await _maybeSpokenNote(
         segs: _sttSegs(primary),
         fullText: primary.text,
@@ -1393,7 +1333,30 @@ class _HomePageState extends State<HomePage> {
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
       _toastSttFailed();
+    } finally {
+      await _discardClipAudio(clip);
     }
+  }
+
+  Future<void> _discardClipAudio(ClipRecord clip) async {
+    final wavPath = clip.wavPath;
+    if (wavPath == null || wavPath.isEmpty) {
+      return;
+    }
+    for (final path in [
+      wavPath,
+      p.join(p.dirname(wavPath), '${clip.id}_speech.wav'),
+    ]) {
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+        }
+      } catch (_) {}
+    }
+    try {
+      await _store.clearWavPath(clip.id);
+    } catch (_) {}
   }
 
   void _toastSttFailed([String? message]) {
@@ -1472,12 +1435,19 @@ class _HomePageState extends State<HomePage> {
     }
     final voices = await VoiceStore.list();
     final wearer = voices.isEmpty ? null : voices.first.name;
+    final unlabeled = joinUnlabeledSegmentText(segs);
     final note = calendarNoteFromClip(
       segs: segs,
-      fallback: fullText,
+      fallback: unlabeled.isNotEmpty
+          ? unlabeled
+          : noteTextWithoutSpeakers(fullText),
       wearer: wearer,
     );
     if (note == null) {
+      return;
+    }
+    final body = noteTextWithoutSpeakers(note);
+    if (body.isEmpty) {
       return;
     }
     try {
@@ -1485,7 +1455,7 @@ class _HomePageState extends State<HomePage> {
         SpokenNote(
           id: const Uuid().v4(),
           createdAt: DateTime.now().toUtc(),
-          text: note,
+          text: body,
           clipId: clipId,
           meetingId: _armed ? _sessionId : null,
         ),
@@ -1761,6 +1731,7 @@ class _HomePageState extends State<HomePage> {
         builder: (_) => MeetingDetailPage(
           meeting: meeting,
           onRecap: () => _cleanMeeting(meeting),
+          onRename: (title) => _store.renameMeeting(meeting.id, title),
           reload: () async {
             await _reload();
             for (final m in _meetings) {
@@ -1816,7 +1787,7 @@ class _HomePageState extends State<HomePage> {
           for (final n in meeting.notes)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
-              child: Text('• ${n.text}'),
+              child: Text('• ${noteTextWithoutSpeakers(n.text)}'),
             ),
         ],
         const SizedBox(height: 8),
@@ -2904,7 +2875,9 @@ class _HomePageState extends State<HomePage> {
                   const SizedBox(height: 6),
                   Text(
                     meeting.preview.isEmpty
-                        ? 'No transcript yet'
+                        ? (meeting.transcribing || meeting.live
+                            ? 'Transcribing…'
+                            : 'No transcript yet')
                         : meeting.preview,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -2940,7 +2913,7 @@ class _HomePageState extends State<HomePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      n.text,
+                      noteTextWithoutSpeakers(n.text),
                       style: AppText.body.copyWith(fontSize: 14, height: 1.45),
                     ),
                     const SizedBox(height: 4),
@@ -3048,7 +3021,12 @@ class _HomePageState extends State<HomePage> {
               TranscriptThread(
                 segments: segs,
                 dark: true,
-                empty: 'Words will appear here as they are heard.',
+                pending: segs.every((s) => s.text.trim().isEmpty) ||
+                    (meeting?.transcribing ?? false) ||
+                    _sttBusy ||
+                    _sttQueue.isNotEmpty,
+                pendingLabel: 'Transcribing…',
+                empty: 'No speech in this meeting yet.',
               ),
             ],
           ),

@@ -1,12 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../audio/speech_vad.dart';
 import '../db/models.dart';
+import 'speaker_spans.dart';
 import 'stt_pricing.dart';
 import 'voice_store.dart';
 
@@ -52,8 +52,9 @@ class OpenAiStt {
     required DateTime startedAt,
     SpeechExtract? speech,
     bool fast = false,
+    bool preferDiarize = false,
   }) async {
-    if (fast) {
+    if (fast && !preferDiarize) {
       try {
         return await _once(
           wav: wav,
@@ -74,7 +75,7 @@ class OpenAiStt {
       }
     }
     final voices = await VoiceStore.list();
-    if (voices.isNotEmpty) {
+    if (preferDiarize || voices.isNotEmpty) {
       try {
         return await _once(
           wav: wav,
@@ -326,34 +327,10 @@ class OpenAiStt {
     required TranscriptResult from,
     required TranscriptResult text,
   }) {
-    final segs = text.segments.map((s) {
-      String? speaker;
-      var best = 0.0;
-      for (final d in from.segments) {
-        final overlap = math.min(s.endS, d.endS) - math.max(s.startS, d.startS);
-        if (overlap > best) {
-          best = overlap;
-          speaker = d.speaker;
-        }
-      }
-      return TranscriptSegment(
-        startS: s.startS,
-        endS: s.endS,
-        spokenAt: s.spokenAt,
-        text: s.text,
-        rawText: s.text,
-        speaker: speaker ?? s.speaker,
-      );
-    }).toList();
-    final labeled =
-        segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
-    return TranscriptResult(
-      text: labeled.isNotEmpty ? labeled : text.text,
+    return overlayDiarization(
+      words: text,
+      diarize: from,
       model: '${from.model}+gpt-transcribe',
-      segments: segs.isNotEmpty ? segs : text.segments,
-      inputTokens: from.inputTokens + text.inputTokens,
-      outputTokens: from.outputTokens + text.outputTokens,
-      costUsd: from.costUsd + text.costUsd,
     );
   }
 }

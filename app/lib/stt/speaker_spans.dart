@@ -87,3 +87,44 @@ List<TranscriptSegment> mergeCloseSegments(
   out.add(cur.copyWith(text: buf, rawText: buf));
   return out;
 }
+
+/// Keep [words] text and timestamps; stamp speaker names from [diarize]
+/// by overlapping time (Saaras words + OpenAI diarize, or Hindi rewrite).
+TranscriptResult overlayDiarization({
+  required TranscriptResult words,
+  required TranscriptResult diarize,
+  String? model,
+}) {
+  final phrases = words.segments;
+  final spans = <SpeakerSpan>[
+    for (final s in diarize.segments)
+      if ((s.speaker ?? '').trim().isNotEmpty)
+        SpeakerSpan(
+          startS: s.startS,
+          endS: s.endS,
+          name: s.speaker!.trim(),
+        ),
+  ];
+  var segs = [
+    for (final s in phrases)
+      s.copyWith(
+        speaker: speakerForInterval(
+              startS: s.startS,
+              endS: s.endS,
+              spans: spans,
+            ) ??
+            s.speaker,
+      ),
+  ];
+  segs = mergeCloseSegments(segs);
+  final labeled =
+      segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
+  return TranscriptResult(
+    text: labeled.isNotEmpty ? labeled : words.text,
+    model: model ?? '${words.model}+${diarize.model}',
+    segments: segs.isNotEmpty ? segs : words.segments,
+    inputTokens: words.inputTokens + diarize.inputTokens,
+    outputTokens: words.outputTokens + diarize.outputTokens,
+    costUsd: words.costUsd + diarize.costUsd,
+  );
+}

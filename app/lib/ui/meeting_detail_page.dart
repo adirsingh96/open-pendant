@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
+import '../calendar/note_command.dart';
 import '../db/meeting.dart';
 import '../db/models.dart';
 import '../stt/api_key_store.dart';
@@ -19,11 +23,13 @@ class MeetingDetailPage extends StatefulWidget {
     super.key,
     required this.meeting,
     required this.onRecap,
+    required this.onRename,
     required this.reload,
   });
 
   final MeetingRecord meeting;
   final Future<void> Function() onRecap;
+  final Future<void> Function(String title) onRename;
   final Future<MeetingRecord?> Function() reload;
 
   @override
@@ -35,31 +41,104 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
   String _tab = 'transcript';
   final _ask = TextEditingController();
   final _searchCtl = TextEditingController();
+  final _titleCtl = TextEditingController();
+  final _titleFocus = FocusNode();
   final _refine = OpenAiRefine();
   String? _question;
   String? _answer;
   bool _asking = false;
+  bool _editingTitle = false;
+  Timer? _sttPoll;
   final _done = <int>{};
+
+  bool get _awaitingTranscript =>
+      _meeting.transcribing || (_meeting.live && !_meeting.hasSpokenText);
 
   @override
   void initState() {
     super.initState();
     _meeting = widget.meeting;
+    _titleFocus.addListener(_onTitleFocusChange);
+    _sttPoll = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_pollTranscript());
+    });
+  }
+
+  Future<void> _pollTranscript() async {
+    if (!mounted || !_awaitingTranscript) {
+      return;
+    }
+    final next = await widget.reload();
+    if (next != null && mounted) {
+      setState(() => _meeting = next);
+    }
   }
 
   @override
   void dispose() {
+    _sttPoll?.cancel();
+    _titleFocus.removeListener(_onTitleFocusChange);
+    _titleFocus.dispose();
+    _titleCtl.dispose();
     _ask.dispose();
     _searchCtl.dispose();
     super.dispose();
   }
 
   String get _title {
+    final t = _meeting.title.trim();
+    if (t.isNotEmpty) {
+      return t;
+    }
     final h = _meeting.recap?.headline.trim() ?? '';
     if (h.isNotEmpty) {
       return h;
     }
     return 'Meeting';
+  }
+
+  void _onTitleFocusChange() {
+    if (!_titleFocus.hasFocus && _editingTitle) {
+      _commitRename();
+    }
+  }
+
+  void _beginRename() {
+    _titleCtl.text = _title;
+    _titleCtl.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _titleCtl.text.length,
+    );
+    setState(() => _editingTitle = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _titleFocus.requestFocus();
+      }
+    });
+  }
+
+  void _cancelRename() {
+    if (!_editingTitle) {
+      return;
+    }
+    setState(() => _editingTitle = false);
+    _titleCtl.text = _title;
+    _titleFocus.unfocus();
+  }
+
+  Future<void> _commitRename() async {
+    if (!_editingTitle) {
+      return;
+    }
+    final next = _titleCtl.text.trim();
+    setState(() => _editingTitle = false);
+    if (next.isEmpty || next == _title) {
+      return;
+    }
+    await widget.onRename(next);
+    if (mounted) {
+      setState(() => _meeting = _meeting.copyWith(title: next));
+    }
   }
 
   String get _meta {
@@ -78,6 +157,56 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
     final n = DateTime.now();
     final l = t.toLocal();
     return l.year == n.year && l.month == n.month && l.day == n.day;
+  }
+
+  Widget _titleBlock() {
+    final style = AppText.headline.copyWith(
+      fontSize: 25,
+      height: 1.15,
+    );
+    if (_editingTitle) {
+      return CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _cancelRename,
+        },
+        child: TextField(
+          controller: _titleCtl,
+          focusNode: _titleFocus,
+          style: style,
+          maxLines: 2,
+          minLines: 1,
+          textInputAction: TextInputAction.done,
+          cursorColor: AppColors.accent,
+          onSubmitted: (_) => _commitRename(),
+          decoration: const InputDecoration(
+            filled: false,
+            isDense: true,
+            contentPadding: EdgeInsets.zero,
+            border: InputBorder.none,
+            enabledBorder: InputBorder.none,
+            focusedBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: AppColors.accent, width: 1.5),
+            ),
+          ),
+        ),
+      );
+    }
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onDoubleTap: _beginRename,
+        child: Tooltip(
+          message: 'Double-click to rename',
+          waitDuration: const Duration(milliseconds: 600),
+          child: Text(
+            _title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+        ),
+      ),
+    );
   }
 
   bool _recapping = false;
@@ -188,15 +317,7 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            _title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppText.headline.copyWith(
-                              fontSize: 25,
-                              height: 1.15,
-                            ),
-                          ),
+                          _titleBlock(),
                           const SizedBox(height: 8),
                           Row(
                             children: [
@@ -244,6 +365,8 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
                             const SizedBox(height: 18),
                             TranscriptThread(
                               segments: _filteredSegs,
+                              pending: _awaitingTranscript,
+                              pendingLabel: 'Transcribing…',
                               empty: 'No speech in this meeting yet.',
                             ),
                           ],
@@ -358,7 +481,7 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
           for (final n in _meeting.notes)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: Text('• ${n.text}'),
+              child: Text('• ${noteTextWithoutSpeakers(n.text)}'),
             ),
         ],
       ],

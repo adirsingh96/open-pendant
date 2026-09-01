@@ -15,7 +15,7 @@ Record only with an obvious LED and an explicit host subscribe (GATT notify on =
 ## What you get
 
 - **Firmware** (Zephyr / nRF Connect SDK 3.4, Zephyr 4.4): BLE GATT PCM + status, IMU still-sleep (mic off when the board is still, wake on motion), battery voltage / SoC estimate.
-- **Flutter app** in [`app/`](app/): arm once for all-day capture, local VAD (+ mic calibration), chunked OpenAI STT, optional speaker names, session transcripts, local SQLite.
+- **Flutter app** in [`app/`](app/): meetings and hold-to-talk notes over BLE, local VAD, **Saaras v4** transcription, optional **OpenAI diarization**, session transcripts, local SQLite.
 - **Laptop tools** in [`tools/`](tools/): BLE capture to WAV, OpenAI or local Whisper.
 
 Protocol, clip schema, and roadmap: [project_context.md](project_context.md). Later sync sketch: [docs/sync_api.md](docs/sync_api.md).
@@ -51,14 +51,14 @@ flutter run -d macos          # BLE works on Mac
 # or a physical iPhone / Android — not the iOS simulator
 ```
 
-Paste `OPENAI_API_KEY` in **Settings**. It is stored on the host (Keychain / Keystore / app-support file on desktop), never on the pendant.
+Paste a **Sarvam** key in **Settings** (required for transcripts) and an **OpenAI** key for diarization, recap, and chat. Keys stay on the host (Keychain / Keystore / app-support file on desktop), never on the pendant.
 
 **Typical day**
 
 1. Connect → optional **Calibrate** (wear as usual, read the script) so quiet neck-mic speech is not skipped.
-2. Optional **Voices**: enroll up to 4 people (2–10 s sample each) for named speaker labels.
-3. Tap **Record** once to arm. Notify stays on; LED stays solid. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local VAD skips the cloud when there is no speech.
-4. Tap **Stop** or **Sleep** to disarm. Home groups chunks into one session transcript; time-range filters and STT spend are on the home screen.
+2. Optional **Voices**: enroll up to 4 people (2–10 s sample each) if you want named speakers. Turn **Diarization** on in Settings.
+3. Start a **meeting** (pendant click) or hold for a **note**. Notify stays on while a meeting is armed; LED stays solid. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local VAD skips the cloud when there is no speech. Double-click a meeting title to rename it.
+4. Stop the meeting when you are done. Home groups chunks into one transcript; the transcript tab shows **Transcribing…** until STT catches up.
 
 More setup (permissions, IMU debug): [app/README.md](app/README.md).
 

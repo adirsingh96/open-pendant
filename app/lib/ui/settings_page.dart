@@ -35,7 +35,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _key = TextEditingController();
   final _sarvam = TextEditingController();
   final _mem0 = TextEditingController();
-  String _stt = SttPrefs.openai;
+  bool _diarize = true;
   String _tab = 'transcription';
   bool _cursorOn = false;
   bool _cursorPaste = true;
@@ -58,7 +58,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _key.text = vals[0] as String;
       _sarvam.text = vals[1] as String;
       _mem0.text = vals[2] as String;
-      _stt = SttPrefs.provider;
+      _diarize = SttPrefs.diarize;
       _cursorOn = CursorPrefs.enabled;
       _cursorPaste = CursorPrefs.pasteIntoCursor;
       _cursorSend = CursorPrefs.autoSend;
@@ -80,7 +80,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _persist() async {
     await ApiKeyStore.write(_key.text);
     await SarvamKeyStore.write(_sarvam.text);
-    await SttPrefs.save(_stt);
+    await SttPrefs.save(diarize: _diarize);
     await CursorPrefs.save(
       on: _cursorOn,
       paste: _cursorPaste,
@@ -228,30 +228,26 @@ class _SettingsPageState extends State<SettingsPage> {
 
   List<Widget> _transcription() {
     return [
-      Text('ENGINE', style: AppText.micro),
-      const SizedBox(height: 12),
-      SegmentedButton<String>(
-        segments: const [
-          ButtonSegment(value: SttPrefs.openai, label: Text('OpenAI')),
-          ButtonSegment(value: SttPrefs.saarasV4, label: Text('Saaras')),
-          ButtonSegment(value: SttPrefs.both, label: Text('Both')),
-        ],
-        selected: {_stt},
-        onSelectionChanged: !_loaded
-            ? null
-            : (s) async {
-                setState(() => _stt = s.first);
-                await SttPrefs.save(_stt);
-              },
-      ),
-      const SizedBox(height: 10),
+      Text('TRANSCRIPTION', style: AppText.micro),
+      const SizedBox(height: 8),
       Text(
-        _stt == SttPrefs.both
-            ? 'Each clip goes to OpenAI and Saaras v4. Journal, Clean, and Memories use OpenAI when it succeeds. Both keys required, about twice the STT cost.'
-            : _stt == SttPrefs.saarasV4
-                ? 'Saaras v4 for Indic text. A small on-device speaker model tags People from their voice samples.'
-                : 'OpenAI file transcription. Named voices use diarization.',
+        'Words always come from Sarvam Saaras v4. No on-device speech models.',
         style: AppText.sub.copyWith(fontSize: 12),
+      ),
+      const SizedBox(height: 18),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('Diarization'),
+        subtitle: const Text(
+          'Meetings also send audio to gpt-4o-transcribe-diarize so turns get speaker names. Enroll People to name them. Adds OpenAI cost.',
+        ),
+        value: _diarize,
+        onChanged: !_loaded
+            ? null
+            : (v) async {
+                setState(() => _diarize = v);
+                await SttPrefs.save(diarize: v);
+              },
       ),
       const SizedBox(height: 26),
       Text('API KEYS', style: AppText.micro),
@@ -262,17 +258,23 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       const SizedBox(height: 14),
       TextField(
-        controller: _key,
-        obscureText: true,
-        decoration: const InputDecoration(labelText: 'OpenAI API key'),
-      ),
-      const SizedBox(height: 12),
-      TextField(
         controller: _sarvam,
         obscureText: true,
         decoration: const InputDecoration(
           labelText: 'Sarvam API key',
           hintText: 'indus.sarvam.ai',
+          helperText: 'Required. Used for every transcript.',
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _key,
+        obscureText: true,
+        decoration: InputDecoration(
+          labelText: 'OpenAI API key',
+          helperText: _diarize
+              ? 'Required for diarization, recap, and ask-about-this-meeting.'
+              : 'Used for recap and ask-about-this-meeting.',
         ),
       ),
       const SizedBox(height: 12),

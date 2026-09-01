@@ -95,6 +95,9 @@ String describeSttModels(Iterable<String?> models) {
 }
 
 String prettySttModel(String model) {
+  if (model.contains('saaras') && model.contains('gpt-4o-transcribe-diarize')) {
+    return 'Saaras v4 + OpenAI diarize';
+  }
   if (model.contains('saaras')) {
     if (model.contains('diar')) {
       return 'Sarvam Saaras v4 + diarize';

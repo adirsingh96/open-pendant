@@ -32,6 +32,11 @@
 	<string>OpenPendant uses Bluetooth to receive audio from the necklace.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>OpenPendant uses Bluetooth to receive audio from the necklace.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>audio</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

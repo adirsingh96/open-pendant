@@ -79,6 +79,16 @@ void main() {
     expect(kept, hasLength(1));
     expect(kept.single.text, 'hello there');
     expect(joinSegmentText(kept), 'Aditya: hello there');
+    expect(joinUnlabeledSegmentText(kept), 'hello there');
+  });
+
+  test('note text drops speaker prefixes', () {
+    expect(
+      noteTextWithoutSpeakers('Aditya: Work on the firmware'),
+      'Work on the firmware',
+    );
+    expect(noteTextWithoutSpeakers('FYI: ship tonight'), 'FYI: ship tonight');
+    expect(noteTextWithoutSpeakers('buy milk'), 'buy milk');
   });
 
   test('event title is truncated', () {

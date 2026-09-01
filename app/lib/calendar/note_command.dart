@@ -49,6 +49,37 @@ String joinSegmentText(List<TranscriptSegment> segs) {
       .join(' ')
       .trim();
 }
+
+String joinUnlabeledSegmentText(List<TranscriptSegment> segs) {
+  return segs
+      .map((s) => s.text.trim())
+      .where((t) => t.isNotEmpty)
+      .join(' ')
+      .trim();
+}
+
+/// Drop diarization prefixes like "Aditya: " from a saved note.
+String noteTextWithoutSpeakers(String text) {
+  var t = text.trim();
+  if (t.isEmpty) {
+    return t;
+  }
+  final prefix = RegExp(
+    r'^(?:Speaker(?:\s+\d+)?|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?):\s+',
+  );
+  while (true) {
+    final m = prefix.firstMatch(t);
+    if (m == null) {
+      break;
+    }
+    final rest = t.substring(m.end).trim();
+    if (rest.isEmpty) {
+      break;
+    }
+    t = rest;
+  }
+  return t;
+}
 String? calendarNoteFromText(String text) {
   var t = text.trim();
   if (t.isEmpty) {
