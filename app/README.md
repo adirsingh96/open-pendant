@@ -55,13 +55,17 @@ Android `AndroidManifest.xml`:
 
 Chunks rotate on IMU sleep, ~30 s of raw buffer, or quiet after speech. Each chunk is VAD-gated; silence is not sent to STT. After transcription succeeds or fails, clip WAV files are deleted. Home stitches session text and shows STT spend. While a clip is still in the STT queue, the meeting UI shows **Transcribing…** instead of an empty transcript.
 
+**Meetings** use a fixed VAD energy floor (`VadGate.meetingEnergyFloor` = `1e9`) and at least **0.5 s** of speech-shaped audio. That is about 10× more sensitive than the note default (`1e10`), so quieter / farther talkers on the Knowles SPU0410 chest mic still reach STT. Spectral checks (speech-band ratio and centroid) still drop hiss and rumble. Wearer **Calibrate** does not change the meeting floor.
+
+**Take a note** in the app is tap-to-start / tap-to-save. Pendant BLE still reports `noteHeld: false` while you are not holding the hardware button; those status packets must not stop an in-app note. Hold-to-talk on the necklace is unchanged.
+
 ## Mic calibrate
 
-**Calibrate** (home): wear the pendant as you will all day, read the script. The host measures speech-band energy at your mouth–mic distance and sets a personal VAD energy floor (saved on this computer). Re-calibrate if how you wear it changes.
+**Calibrate** (home): wear the pendant as you will all day, read the script. The host measures speech-band energy at your mouth–mic distance and sets a personal VAD energy floor for **notes** (saved on this device). Re-calibrate if how you wear it changes. Meetings ignore this floor.
 
 ## Voices (speaker names)
 
-**Voices**: enroll up to 4 people (2–10 s sample + name). When **Diarization** is on, meeting clips go to `gpt-4o-transcribe-diarize` with those references; speaker labels are stamped onto the Saaras transcript by time. Notes stay on Saaras only (no speaker prefix in the note text).
+**Voices**: enroll up to 4 people (2–10 s sample + name). When **Diarization** is on, meeting clips go to `gpt-4o-transcribe-diarize` with those references; speaker labels are stamped onto the Saaras transcript by time, and a single long Saaras phrase is split at OpenAI speaker-change times. Notes stay on Saaras only (no speaker prefix in the note text).
 
 ## IMU sleep debug
 

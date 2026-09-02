@@ -106,6 +106,9 @@ class _HomePageState extends State<HomePage> {
   bool _cleaning = false;
   bool _commandNext = false;
   bool _noteHolding = false;
+  /// True when Capture on the phone started the note. Pendant status still
+  /// reports `noteHeld: false`, so those packets must not end an in-app note.
+  bool _noteFromApp = false;
   DateTime? _noteStartedAt;
   Timer? _noteTick;
   bool _noteTempArm = false;
@@ -223,9 +226,10 @@ class _HomePageState extends State<HomePage> {
       }
     }
     if (held && !_noteHolding) {
+      _noteFromApp = false;
       _noteHolding = true;
       _noteBegin = _beginButtonNote();
-    } else if (!held && _noteHolding) {
+    } else if (!held && _noteHolding && !_noteFromApp) {
       _noteHolding = false;
       unawaited(_endButtonNote());
     }
@@ -235,6 +239,7 @@ class _HomePageState extends State<HomePage> {
     await NotePrefs.load();
     if (!NotePrefs.enabled) {
       _noteHolding = false;
+      _noteFromApp = false;
       return;
     }
     try {
@@ -276,6 +281,7 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e) {
       _noteHolding = false;
+      _noteFromApp = false;
       _noteTempArm = false;
       _noteStartedAt = null;
       _noteTick?.cancel();
@@ -668,6 +674,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _failPendantNote() async {
     _noteHolding = false;
+    _noteFromApp = false;
     await _noteBegin;
     if (_noteTempArm) {
       try {
@@ -862,7 +869,11 @@ class _HomePageState extends State<HomePage> {
     }
     final last = _ble.reassembler.lastComplete;
     _lastPcmAt = DateTime.now();
-    if (pcmHasVoice(last, energyFloor: VadGate.energyFloor)) {
+    if (pcmHasVoice(
+      last,
+      energyFloor:
+          _noteHolding ? VadGate.energyFloor : VadGate.meetingEnergyFloor,
+    )) {
       _lastSpeechAt = DateTime.now();
       _hadSpeechInChunk = true;
     }
@@ -984,6 +995,7 @@ class _HomePageState extends State<HomePage> {
     _armTick = null;
     if (_noteHolding) {
       _noteHolding = false;
+      _noteFromApp = false;
       await _endButtonNote();
     }
     while (_rotating) {
@@ -1159,10 +1171,13 @@ class _HomePageState extends State<HomePage> {
             : full;
     final speech = extractSpeech(
       pcm,
-      energyFloor: VadGate.energyFloor,
-      minSpeechS: buttonNote ? 0.12 : VadGate.minSpeechS,
+      energyFloor: buttonNote
+          ? VadGate.energyFloor
+          : VadGate.meetingEnergyFloor,
+      minSpeechS: buttonNote ? 0.12 : VadGate.meetingMinSpeechS,
     );
-    if (speech.speechDurationS < (buttonNote ? 0.12 : VadGate.minSpeechS)) {
+    if (speech.speechDurationS <
+        (buttonNote ? 0.12 : VadGate.meetingMinSpeechS)) {
       if (buttonNote) {
         _buttonNoteIds.remove(clip.id);
         await _store.upsertClip(
@@ -1838,6 +1853,7 @@ class _HomePageState extends State<HomePage> {
       await _stopScreenNote();
       return;
     }
+    _noteFromApp = true;
     setState(() => _noteHolding = true);
     _noteBegin = _beginButtonNote();
     await _noteBegin;
@@ -1858,6 +1874,7 @@ class _HomePageState extends State<HomePage> {
         return;
       }
       _noteHolding = false;
+      _noteFromApp = false;
       await _endButtonNote();
     } finally {
       _noteStopping = false;

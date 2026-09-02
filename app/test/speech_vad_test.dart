@@ -38,6 +38,20 @@ void main() {
     expect(pcmHasVoice(_sine(samples: 512, hz: 7000, amp: 2500)), isFalse);
   });
 
+  test('meeting floor keeps quieter speech than the note default', () {
+    final distant = _sine(samples: 512, hz: 1000, amp: 150);
+    expect(pcmHasVoice(distant), isFalse);
+    expect(
+      pcmHasVoice(distant, energyFloor: VadGate.meetingEnergyFloor),
+      isTrue,
+    );
+    expect(
+      pcmHasVoice(_sine(samples: 512, hz: 1000, amp: 40),
+          energyFloor: VadGate.meetingEnergyFloor),
+      isFalse,
+    );
+  });
+
   test('suggestEnergyFloor follows soft speech', () {
     final soft = _sine(samples: 16000 * 5, hz: 1000, amp: 400);
     final floor = suggestEnergyFloor(soft);

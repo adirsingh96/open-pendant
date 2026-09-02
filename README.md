@@ -55,10 +55,10 @@ Paste a **Sarvam** key in **Settings** (required for transcripts) and an **OpenA
 
 **Typical day**
 
-1. Connect → optional **Calibrate** (wear as usual, read the script) so quiet neck-mic speech is not skipped.
+1. Connect. Optional **Calibrate** (wear as usual, read the script) sets a personal VAD floor for **notes** only.
 2. Optional **Voices**: enroll up to 4 people (2–10 s sample each) if you want named speakers. Turn **Diarization** on in Settings.
-3. Start a **meeting** (pendant click) or hold for a **note**. Notify stays on while a meeting is armed; LED stays solid. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local VAD skips the cloud when there is no speech. Double-click a meeting title to rename it.
-4. Stop the meeting when you are done. Home groups chunks into one transcript; the transcript tab shows **Transcribing…** until STT catches up.
+3. Start a **meeting** (pendant click, or **Start meeting** in the app) or take a **note** (hold the pendant ~0.7 s, or **Take a note** on the phone). Notify stays on while a meeting is armed; LED stays solid. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local VAD skips the cloud when there is no speech. Meetings use a fixed energy floor (`1e9`, ~0.5 s of speech) so people a metre or two from the chest mic still pass; hiss still has to look like voice. Wearer calibrate does not raise that meeting gate. Double-click a meeting title to rename it.
+4. Stop the meeting when you are done. Home groups chunks into one transcript; with diarization on, a long Saaras phrase is split at OpenAI speaker-change times. The transcript tab shows **Transcribing…** until STT catches up.
 
 More setup (permissions, IMU debug): [app/README.md](app/README.md).
 

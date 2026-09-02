@@ -205,9 +205,13 @@ class FrameSpectrum {
   final double centroidHz;
 }
 
-/// In-memory VAD loudness floor. Loaded/saved by [VadCal].
+/// In-memory VAD loudness floor. Loaded/saved by [VadCal] for notes.
+/// Meetings use a fixed floor so distant talkers are not gated by wearer
+/// calibrate (Knowles SPU0410 on the chest, ~1–2 m others).
 class VadGate {
   static const defaultEnergyFloor = 1e10;
+  static const meetingEnergyFloor = 1e9;
+  static const meetingMinSpeechS = 0.5;
   static double energyFloor = defaultEnergyFloor;
   static DateTime? calibratedAt;
 
