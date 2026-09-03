@@ -32,8 +32,7 @@ Future<void> migrateMacosSandboxData() async {
   await destDocs.create(recursive: true);
   final destDb = File(p.join(destDocs.path, 'openpendant.db'));
   final srcSize = (await srcDb.stat()).size;
-  final destSize =
-      await destDb.exists() ? (await destDb.stat()).size : 0;
+  final destSize = await destDb.exists() ? (await destDb.stat()).size : 0;
   if (srcSize > destSize) {
     await srcDb.copy(destDb.path);
     for (final extra in ['-wal', '-shm']) {
@@ -101,4 +100,21 @@ Future<void> _mergeDir(Directory src, Directory dest) async {
     }
     await e.copy(to.path);
   }
+}
+
+/// Best-effort wipe of the old on-device recap model (~2 GB) and its token file.
+Future<void> deleteLegacyGemmaCache() async {
+  try {
+    final root = await getApplicationSupportDirectory();
+    for (final name in ['flutter_gemma', 'huggingface_token', 'recap_engine']) {
+      final dir = Directory(p.join(root.path, name));
+      if (await dir.exists()) {
+        await dir.delete(recursive: true);
+      }
+      final file = File(p.join(root.path, name));
+      if (await file.exists()) {
+        await file.delete();
+      }
+    }
+  } catch (_) {}
 }

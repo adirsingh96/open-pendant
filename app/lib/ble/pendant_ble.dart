@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'pcm_reassembler.dart';
+import 'pendant_prefs.dart';
 
 const pendantServiceUuid = '70301101-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 const pcmCharUuid = '70301102-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 const statusCharUuid = '70301103-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
+const controlCharUuid = '70301104-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 
 class PendantStatus {
   PendantStatus({
@@ -129,6 +131,7 @@ class PendantBle {
   BluetoothDevice? device;
   BluetoothCharacteristic? _pcm;
   BluetoothCharacteristic? _status;
+  BluetoothCharacteristic? _control;
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<List<int>>? _statusSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
@@ -196,7 +199,8 @@ class PendantBle {
     return null;
   }
 
-  Future<BluetoothDevice> scan({Duration timeout = const Duration(seconds: 20)}) async {
+  Future<BluetoothDevice> scan(
+      {Duration timeout = const Duration(seconds: 20)}) async {
     await waitForAdapter();
     final existing = await findExisting();
     if (existing != null) {
@@ -249,6 +253,10 @@ class PendantBle {
     await waitForAdapter();
     _intentionalDisconnect = false;
     device = d;
+    await PendantPrefs.markSeen(
+      deviceName: d.platformName,
+      remoteId: d.remoteId.str,
+    );
     await _connSub?.cancel();
     await d.connect(timeout: const Duration(seconds: 20));
     try {
@@ -257,6 +265,7 @@ class PendantBle {
     final services = await d.discoverServices();
     _pcm = null;
     _status = null;
+    _control = null;
     for (final s in services) {
       for (final c in s.characteristics) {
         final id = c.uuid.str.toLowerCase();
@@ -265,6 +274,9 @@ class PendantBle {
         }
         if (id == statusCharUuid) {
           _status = c;
+        }
+        if (id == controlCharUuid) {
+          _control = c;
         }
       }
     }
@@ -307,19 +319,49 @@ class PendantBle {
     } catch (_) {}
   }
 
-  Future<void> reconnect() async {
+  /// Reattach GATT if iOS/Android still holds the pendant after a process
+  /// restore. Does not scan.
+  Future<void> adoptExisting() async {
+    await waitForAdapter();
+    final d = await _knownDevice();
+    if (d == null || !d.isConnected) {
+      throw Exception('No restored pendant');
+    }
+    await connect(d);
+  }
+
+  /// Reconnect a previously paired pendant without scanning (works while the
+  /// phone is locked; iOS forbids background scans).
+  Future<void> reconnectKnown() async {
+    await waitForAdapter();
+    final d = await _knownDevice();
+    if (d == null) {
+      throw Exception('No known pendant to reconnect');
+    }
+    await connect(d);
+  }
+
+  Future<BluetoothDevice?> _knownDevice() async {
     final existing = await findExisting();
     if (existing != null) {
-      await connect(existing);
-      return;
+      return existing;
     }
     final last = device;
     if (last != null) {
-      try {
-        await connect(last);
-        return;
-      } catch (_) {}
+      return last;
     }
+    final id = PendantPrefs.remoteId.trim();
+    if (id.isNotEmpty) {
+      return BluetoothDevice.fromId(id);
+    }
+    return null;
+  }
+
+  Future<void> reconnect() async {
+    try {
+      await reconnectKnown();
+      return;
+    } catch (_) {}
     final scanned = await scan(timeout: const Duration(seconds: 15));
     await connect(scanned);
   }
@@ -332,6 +374,9 @@ class PendantBle {
       throw Exception('Not connected');
     }
     reassembler.reset();
+    try {
+      await device?.requestMtu(247);
+    } catch (_) {}
     await _notifySub?.cancel();
     _notifySub = c.onValueReceived.listen((data) {
       reassembler.addNotify(data);
@@ -365,6 +410,86 @@ class PendantBle {
     _connSub = null;
     _pcm = null;
     _status = null;
+    _control = null;
     lastStatus = null;
+  }
+
+  Future<void> stopScan() async {
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+  }
+
+  bool get isConnected {
+    final d = device;
+    return d != null && d.isConnected;
+  }
+
+  /// Flash the board LEDs (needs firmware with the control characteristic).
+  Future<bool> setLocate(bool on) async {
+    final c = _control;
+    if (c == null) {
+      return false;
+    }
+    try {
+      final payload = [on ? 1 : 0];
+      if (c.properties.writeWithoutResponse) {
+        await c.write(payload, withoutResponse: true);
+      } else {
+        await c.write(payload);
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<int?> readRssi() async {
+    final d = device;
+    if (d == null || !d.isConnected) {
+      return null;
+    }
+    try {
+      return await d.readRssi();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isPendantResult(ScanResult r) {
+    final name = r.advertisementData.advName.isNotEmpty
+        ? r.advertisementData.advName
+        : r.device.platformName;
+    final uuids = r.advertisementData.serviceUuids
+        .map((g) => g.str.toLowerCase())
+        .toList();
+    return isPendantName(name) || uuids.contains(pendantServiceUuid);
+  }
+
+  /// Live advertisement RSSI while the pendant is not connected.
+  Future<StreamSubscription<List<ScanResult>>> listenScanRssi(
+    void Function(int rssi) onRssi,
+  ) async {
+    await stopScan();
+    final sub = FlutterBluePlus.scanResults.listen((results) {
+      int? best;
+      for (final r in results) {
+        if (!_isPendantResult(r)) {
+          continue;
+        }
+        if (best == null || r.rssi > best) {
+          best = r.rssi;
+        }
+      }
+      if (best != null) {
+        onRssi(best);
+      }
+    });
+    await FlutterBluePlus.startScan(
+      timeout: const Duration(seconds: 40),
+      continuousUpdates: true,
+      androidScanMode: AndroidScanMode.lowLatency,
+    );
+    return sub;
   }
 }

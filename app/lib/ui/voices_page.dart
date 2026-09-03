@@ -78,8 +78,8 @@ class _VoicesPageState extends State<VoicesPage> {
     }
     final name = VoiceStore.sanitizeName(_name.text);
     if (name.isEmpty) {
-      setState(
-          () => _status = 'Enter a name, then record 2 to 10 seconds of speech.');
+      setState(() =>
+          _status = 'Enter a name, then record 2 to 10 seconds of speech.');
       return;
     }
     setState(() {

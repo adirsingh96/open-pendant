@@ -504,8 +504,7 @@ class _MemoriesPageState extends State<MemoriesPage> {
                       focusedBorder: InputBorder.none,
                       filled: false,
                       isDense: true,
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 13),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 13),
                     ),
                   ),
                 ),

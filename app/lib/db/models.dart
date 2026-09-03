@@ -104,6 +104,18 @@ String prettySttModel(String model) {
     }
     return 'Sarvam Saaras v4';
   }
+  if (model.startsWith('qwen3-asr:')) {
+    if (model.contains('+cs')) {
+      return 'Qwen3-ASR mixed (on-device)';
+    }
+    return 'Qwen3-ASR (on-device)';
+  }
+  if (model.startsWith('whisper:')) {
+    return 'Whisper turbo (on-device)';
+  }
+  if (model.contains('hindi2hinglish') || model.contains('indicconformer:')) {
+    return 'Hindi ASR (on-device)';
+  }
   return model;
 }
 
@@ -207,7 +219,9 @@ class ClipRecord {
   final List<TranscriptSegment> altSegments;
 
   bool get hasAltStt =>
-      altFullText.trim().isNotEmpty || altSegments.isNotEmpty || altError.isNotEmpty;
+      altFullText.trim().isNotEmpty ||
+      altSegments.isNotEmpty ||
+      altError.isNotEmpty;
 
   double get spendUsd => costUsd + refineCostUsd + altCostUsd;
 
@@ -217,9 +231,8 @@ class ClipRecord {
     final captured = durationS.toStringAsFixed(1);
     final sent = billedS.toStringAsFixed(1);
     final cut = removedS.toStringAsFixed(1);
-    final tok = totalTokens > 0
-        ? '  $inputTokens in / $outputTokens out tok'
-        : '';
+    final tok =
+        totalTokens > 0 ? '  $inputTokens in / $outputTokens out tok' : '';
     final name = sttModel;
     final model = (name != null && name.isNotEmpty) ? ' · $name' : '';
     return 'Captured ${captured}s · removed ${cut}s · sent ${sent}s'
@@ -296,15 +309,14 @@ class SessionGroup {
   double get costUsd => clips.fold(0.0, (a, c) => a + c.costUsd);
 
   String get fullText {
-    final parts = clips
-        .map((c) => c.fullText.trim())
-        .where((t) => t.isNotEmpty)
-        .toList();
+    final parts =
+        clips.map((c) => c.fullText.trim()).where((t) => t.isNotEmpty).toList();
     return parts.join(' ');
   }
 
   String get status {
-    if (clips.any((c) => c.status == 'transcribing' || c.status == 'refining')) {
+    if (clips
+        .any((c) => c.status == 'transcribing' || c.status == 'refining')) {
       return 'transcribing';
     }
     if (clips.any((c) => c.status == 'error')) {
@@ -342,8 +354,7 @@ class SessionGroup {
         'sent ${billedS.toStringAsFixed(1)}s$tok$model  ${SttPricing.formatUsd(costUsd)}';
   }
 
-  double get spendUsd =>
-      clips.fold(0.0, (a, c) => a + c.spendUsd);
+  double get spendUsd => clips.fold(0.0, (a, c) => a + c.spendUsd);
 }
 
 class SpokenNote {
@@ -353,6 +364,8 @@ class SpokenNote {
     required this.text,
     this.clipId,
     this.meetingId,
+    this.dueAt,
+    this.done = false,
   });
 
   final String id;
@@ -360,4 +373,24 @@ class SpokenNote {
   final String text;
   final String? clipId;
   final String? meetingId;
+  final DateTime? dueAt;
+  final bool done;
+
+  bool get isMoment => text.trim().toLowerCase() == 'marked moment';
+
+  SpokenNote copyWith({
+    DateTime? dueAt,
+    bool clearDueAt = false,
+    bool? done,
+  }) {
+    return SpokenNote(
+      id: id,
+      createdAt: createdAt,
+      text: text,
+      clipId: clipId,
+      meetingId: meetingId,
+      dueAt: clearDueAt ? null : (dueAt ?? this.dueAt),
+      done: done ?? this.done,
+    );
+  }
 }

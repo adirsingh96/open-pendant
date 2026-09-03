@@ -17,9 +17,17 @@ flutter devices
 flutter run
 ```
 
-Paste API keys in **Settings**. **Sarvam** is required for every transcript (Saaras v4). **OpenAI** is used for optional meeting diarization, recap, and ask-about-this-meeting. Toggle **Diarization** in Settings. Enrolled **People** samples are sent to OpenAI as speaker references; there is no on-device speaker model. Clean this day and Memories still use OpenAI. Never put keys in firmware.
+Paste API keys in **Settings**. **Sarvam** is required for cloud transcripts (Saaras v4). Or switch **Transcription** to **On-device** Qwen3-ASR 0.6B (~1 GB once). Transcripts are saved as the engine returns them. **OpenAI** is used for optional meeting diarization (Saaras path only), day Clean, Memories, and meeting Recap.
 
-Disconnect nRF Connect first (the pendant allows one BLE connection).
+Disconnect nRF Connect first (the pendant allows one BLE connection). Optional **Auto-connect** in Settings → Behavior links the necklace when it is nearby and the app is open (off by default).
+
+**Find phone:** double-click the pendant button while connected. The phone plays a looping tone (ignores the iOS silent switch) until you tap the screen, double-click again, or 40 seconds pass. Leave the app in the switcher; a force-quit will not receive the button.
+
+**Find pendant:** from the connected sheet or Settings → More. Walk and watch the ring — a stronger BLE signal means closer. It cannot point a compass direction. Current firmware also flashes the board LEDs while you search.
+
+**Note reminders:** “remind me to call mom at 10 AM” notifies 15 minutes before (or 5 minutes / at due if you are already close). Notes with no clock are included in an 8 AM digest until you check them off on the Notes tab. iOS will ask for notification permission the first time a reminder is scheduled.
+
+**Daily review:** Home’s briefing surfaces the next pending note and unfinished work. **Close today** sends that day’s stored transcript text and notes to OpenAI, saves a structured recap, and promotes follow-ups/open loops into checkable notes. The recap feeds Memories and optionally Mem0. Open the day review and tap refresh to replace the recap after more recording; refreshing does not create recap copies, but it does use OpenAI again.
 
 If `flutter run` fails with `failed to create ... /.config/flutter`, your `~/.config` may be owned by root:
 
@@ -43,11 +51,13 @@ This app disables Swift Package Manager in `pubspec.yaml` because `flutter_secur
 iOS `ios/Runner/Info.plist`:
 
 - `NSBluetoothAlwaysUsageDescription` / `NSBluetoothPeripheralUsageDescription`
-- `UIBackgroundModes`: `bluetooth-central` and `audio` so pendant buttons and capture still work when the phone is locked (leave the app in the switcher; a force-quit will not wake)
+- `UIBackgroundModes`: `bluetooth-central` and `audio` so pendant buttons (including find-phone) and capture still work when the phone is locked (leave the app in the switcher; a force-quit will not wake)
+- Local notifications: the first scheduled reminder prompts for alert permission. Timed notes and the morning digest still fire if the app is in the background.
 
 Android `AndroidManifest.xml`:
 
 - `BLUETOOTH`, `BLUETOOTH_ADMIN`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `ACCESS_FINE_LOCATION` (pre-12)
+- `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED`, `SCHEDULE_EXACT_ALARM` for note reminders
 
 ## Consent and armed capture
 

@@ -55,6 +55,9 @@
 
 dmic_dev: &pdm0 {
 	status = "okay";
+	/* Board DTS uses PCLK32M (HFINT). That clock is too jittery for STT. */
+	clock-source = "PCLK32M_HFXO";
+	queue-size = <8>;
 };
 
 &i2c0 {

@@ -7,6 +7,7 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <hal/nrf_power.h>
+#include <hal/nrf_pdm.h>
 #include <zephyr/audio/dmic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
@@ -15,10 +16,15 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/att.h>
 
 #define MAX_SAMPLE_RATE  16000
 #define SAMPLE_BIT_WIDTH 16
-#define BLOCK_SIZE       1024
+/* One GATT notify at ATT MTU 247 (3 + 4 header + 240). Splitting a 1024-byte
+ * PDM block across 5 notifies, then concatenating if a middle notify was
+ * dropped, is how pendant STT became noise while the phone mic stayed fine.
+ */
+#define BLOCK_SIZE       240
 
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -30,10 +36,12 @@
 	BT_UUID_128_ENCODE(0x70301102, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
 #define PENDANT_STATUS_UUID_VAL \
 	BT_UUID_128_ENCODE(0x70301103, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
+#define PENDANT_CTRL_UUID_VAL \
+	BT_UUID_128_ENCODE(0x70301104, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
 
 #define PCM_HDR_SIZE 4
 
-K_MEM_SLAB_DEFINE_STATIC(rx_mem_slab, BLOCK_SIZE, 4, 4);
+K_MEM_SLAB_DEFINE_STATIC(rx_mem_slab, BLOCK_SIZE, 8, 4);
 
 const struct device *mic_dev = DEVICE_DT_GET(DT_NODELABEL(dmic_dev));
 const struct device *imu_dev = DEVICE_DT_GET(DT_NODELABEL(lsm6ds3tr_c));
@@ -48,6 +56,7 @@ static const struct gpio_dt_spec user_btn =
 static const struct bt_uuid_128 pendant_svc_uuid = BT_UUID_INIT_128(PENDANT_SVC_UUID_VAL);
 static const struct bt_uuid_128 pendant_pcm_uuid = BT_UUID_INIT_128(PENDANT_PCM_UUID_VAL);
 static const struct bt_uuid_128 pendant_status_uuid = BT_UUID_INIT_128(PENDANT_STATUS_UUID_VAL);
+static const struct bt_uuid_128 pendant_ctrl_uuid = BT_UUID_INIT_128(PENDANT_CTRL_UUID_VAL);
 
 /* Name in the primary packet so macOS CoreBluetooth sees it (31-byte ADV
  * cannot hold both a complete name and a 128-bit UUID). UUID is in the
@@ -68,6 +77,7 @@ static volatile bool imu_sleep;
 static volatile bool status_notify_enabled;
 static uint8_t status_buf[8];
 static int last_volume;
+static int64_t locate_until;
 static void led_set(const struct gpio_dt_spec *l, int on)
 {
 	if (gpio_is_ready_dt(l)) {
@@ -82,6 +92,7 @@ static void note_led(bool on)
 
 static void status_notify(int volume);
 static void mic_set_run(bool on);
+static void ble_apply_conn_params(bool pcm_stream);
 static struct bt_conn *current_conn;
 static uint16_t pcm_seq;
 static bool mic_running;
@@ -107,16 +118,41 @@ static bool btn_note_held;
 static int64_t btn_press_ms;
 static int64_t btn_release_ms;
 
-/* Idle: 250 ms green every 2 s. Red is only for an active meeting. */
+/* Idle: 250 ms green every 2 s. Red is only for an active meeting.
+ * Locate: fast RGB flash so you can spot the board in a bag or on a desk.
+ */
+static bool locate_active(void)
+{
+	return locate_until != 0 && k_uptime_get() < locate_until;
+}
+
 static void leds_update(void)
 {
+	if (locate_active()) {
+		const bool flash = (k_uptime_get() % 360) < 180;
+
+		if (pcm_notify_enabled || btn_note_held) {
+			led_set(&led, 1);
+			led_set(&led_green, 0);
+			led_set(&led_blue, flash);
+			return;
+		}
+		led_set(&led, flash);
+		led_set(&led_green, flash);
+		led_set(&led_blue, !flash);
+		return;
+	}
 	if (pcm_notify_enabled || btn_note_held) {
 		led_set(&led_green, 0);
 		led_set(&led, pcm_notify_enabled ? 1 : 0);
+		if (!btn_note_held) {
+			led_set(&led_blue, 0);
+		}
 		return;
 	}
 	led_set(&led, 0);
 	led_set(&led_green, (k_uptime_get() % 2000) < 250 ? 1 : 0);
+	led_set(&led_blue, 0);
 }
 
 static void btn_emit(uint8_t ev)
@@ -455,6 +491,30 @@ static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr
 				 sizeof(status_buf));
 }
 
+static ssize_t control_write(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr, const void *buf,
+			     uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *p = buf;
+
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(flags);
+
+	if (offset != 0 || len < 1) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	if (p[0] != 0) {
+		locate_until = k_uptime_get() + 60000;
+		printk("Locate ON\n");
+	} else {
+		locate_until = 0;
+		printk("Locate OFF\n");
+	}
+	leds_update();
+	return len;
+}
+
 static void status_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
 	status_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
@@ -470,6 +530,9 @@ static void pcm_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 		imu_sleep = false;
 		imu_still_hits = 0;
 		mic_set_run(true);
+		ble_apply_conn_params(true);
+	} else {
+		ble_apply_conn_params(false);
 	}
 	leds_update();
 }
@@ -486,6 +549,10 @@ BT_GATT_SERVICE_DEFINE(pendant_svc,
 			       BT_GATT_PERM_READ,
 			       status_read, NULL, NULL),
 	BT_GATT_CCC(status_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CHARACTERISTIC(&pendant_ctrl_uuid.uuid,
+			       BT_GATT_CHRC_WRITE |
+				       BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_WRITE, NULL, control_write, NULL),
 );
 
 static void status_notify(int volume)
@@ -548,8 +615,17 @@ static int pcm_notify_chunk(const uint8_t *pcm, size_t pcm_len)
 		pkt[3] = frag_count;
 		memcpy(&pkt[PCM_HDR_SIZE], pcm + offset, n);
 
-		err = bt_gatt_notify(current_conn, &pendant_svc.attrs[2], pkt,
-				     PCM_HDR_SIZE + n);
+		for (int tries = 0; tries < 8; tries++) {
+			err = bt_gatt_notify(current_conn, &pendant_svc.attrs[2],
+					     pkt, PCM_HDR_SIZE + n);
+			if (err == 0) {
+				break;
+			}
+			if (err != -ENOMEM && err != -EAGAIN) {
+				return err;
+			}
+			k_sleep(K_MSEC(2));
+		}
 		if (err) {
 			return err;
 		}
@@ -595,15 +671,58 @@ static void schedule_adv_restart(void)
 	k_work_schedule(&adv_restart_work, K_MSEC(50));
 }
 
-static void connected(struct bt_conn *conn, uint8_t err)
+static void ble_apply_conn_params(bool pcm_stream)
 {
 	struct bt_le_conn_param conn_param = {
-		.interval_min = 6,
-		.interval_max = 12,
+		/* Recording: 7.5–15 ms like the original good audio path.
+		 * Idle: 15–30 ms and a 6 s timeout so a locked iPhone does
+		 * not HCI 0x08.
+		 */
+		.interval_min = pcm_stream ? 6 : 12,
+		.interval_max = pcm_stream ? 12 : 24,
 		.latency = 0,
-		.timeout = 200, /* 2 s: recover if the host app vanishes */
+		.timeout = 600,
 	};
 
+	if (current_conn == NULL) {
+		return;
+	}
+	bt_conn_le_param_update(current_conn, &conn_param);
+}
+
+static bool le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
+{
+	ARG_UNUSED(conn);
+	printk("BLE param req int=%u-%u lat=%u to=%u pcm=%d\n",
+	       param->interval_min, param->interval_max, param->latency,
+	       param->timeout, pcm_notify_enabled);
+	if (pcm_notify_enabled && param->interval_min > 12) {
+		printk("BLE reject slow interval while PCM streams\n");
+		return false;
+	}
+	return true;
+}
+
+static void le_param_updated(struct bt_conn *conn, uint16_t interval,
+			     uint16_t latency, uint16_t timeout)
+{
+	static int64_t last_fast_req;
+
+	ARG_UNUSED(conn);
+	printk("BLE params int=%u lat=%u to=%u\n", interval, latency, timeout);
+	if (pcm_notify_enabled && interval > 12) {
+		int64_t now = k_uptime_get();
+
+		if (now - last_fast_req > 2000) {
+			last_fast_req = now;
+			printk("BLE re-request fast interval for PCM\n");
+			ble_apply_conn_params(true);
+		}
+	}
+}
+
+static void connected(struct bt_conn *conn, uint8_t err)
+{
 	if (err) {
 		printk("BLE connection failed (err 0x%02x)\n", err);
 		schedule_adv_restart();
@@ -618,7 +737,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	current_conn = bt_conn_ref(conn);
 	printk("BLE connected\n");
 
-	bt_conn_le_param_update(conn, &conn_param);
+	ble_apply_conn_params(pcm_notify_enabled);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -629,6 +748,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	pcm_notify_enabled = false;
 	status_notify_enabled = false;
 	btn_note_held = false;
+	locate_until = 0;
 	note_led(false);
 	led_set(&led, 0);
 	led_set(&led_green, 0);
@@ -645,6 +765,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.le_param_req = le_param_req,
+	.le_param_updated = le_param_updated,
 };
 
 static int ble_start(void)
@@ -771,6 +893,8 @@ int main(void)
 		printk("ERROR: Failed to configure DMIC\n");
 		return 0;
 	}
+	nrf_pdm_gain_set(NRF_PDM, NRF_PDM_GAIN_DEFAULT, NRF_PDM_GAIN_DEFAULT);
+	printk("PDM gain default, HFXO clock\n");
 
 	if (imu_bringup() == 0) {
 		printk("IMU ready (sleep when still, wake on motion).\n");

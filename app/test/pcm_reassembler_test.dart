@@ -4,13 +4,18 @@ import 'package:openpendant/ble/pendant_ble.dart';
 import 'package:openpendant/ble/pcm_reassembler.dart';
 
 void main() {
-  test('reassembles fragmented GATT PCM', () {
+  test('reassembles out-of-order fragments', () {
     final r = PcmReassembler();
-    r.addNotify([1, 0, 0, 2, 0x11, 0x22]);
     r.addNotify([1, 0, 1, 2, 0x33, 0x44]);
-    expect(r.complete.length, 1);
+    r.addNotify([1, 0, 0, 2, 0x11, 0x22]);
     expect(r.pcmBytes(), [0x11, 0x22, 0x33, 0x44]);
-    expect(r.seqGaps, 0);
+  });
+
+  test('does not emit a block if a middle fragment is missing', () {
+    final r = PcmReassembler();
+    r.addNotify([1, 0, 0, 3, 0x11]);
+    r.addNotify([1, 0, 2, 3, 0x33]);
+    expect(r.complete, isEmpty);
   });
 
   test('addRaw appends host-mic PCM', () {

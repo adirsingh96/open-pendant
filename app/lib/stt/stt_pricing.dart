@@ -4,6 +4,7 @@ class SttPricing {
   static const transcribePerMin = 0.0045;
   static const miniPerMin = 0.003;
   static const whisperPerMin = 0.006;
+
   /// Catalogue: ₹30/h transcribe, ₹45/h with diarization. Approx USD for the spend UI.
   static const inrPerUsd = 87.0;
   static const saarasInrPerHour = 30.0;
@@ -14,10 +15,14 @@ class SttPricing {
   static const defaultOutputPerMTok = 10.0;
 
   static double perMinute(String model) {
+    if (model.startsWith('whisper:') ||
+        model.startsWith('indicconformer:') ||
+        model.startsWith('qwen3-asr:')) {
+      return 0;
+    }
     if (model.contains('saaras')) {
-      final inr = model.contains('diar')
-          ? saarasDiarizeInrPerHour
-          : saarasInrPerHour;
+      final inr =
+          model.contains('diar') ? saarasDiarizeInrPerHour : saarasInrPerHour;
       return inr / inrPerUsd / 60.0;
     }
     if (model.contains('diarize')) {
@@ -39,11 +44,17 @@ class SttPricing {
     int outputTokens = 0,
   }) {
     // gpt-transcribe is billed per minute only (no published token rates).
+    if (model.startsWith('whisper:') ||
+        model.startsWith('indicconformer:') ||
+        model.startsWith('qwen3-asr:')) {
+      return 0;
+    }
     if (model != 'gpt-transcribe' &&
         !model.contains('diarize') &&
         !model.contains('saaras') &&
         (inputTokens > 0 || outputTokens > 0)) {
-      final inRate = model.contains('mini') ? miniInputPerMTok : defaultInputPerMTok;
+      final inRate =
+          model.contains('mini') ? miniInputPerMTok : defaultInputPerMTok;
       final outRate =
           model.contains('mini') ? miniOutputPerMTok : defaultOutputPerMTok;
       return inputTokens / 1e6 * inRate + outputTokens / 1e6 * outRate;

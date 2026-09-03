@@ -22,11 +22,8 @@ bool hasPersoArabic(String s) {
 }
 
 bool hasRepeatLoop(String s) {
-  final toks = s
-      .toLowerCase()
-      .split(RegExp(r'\s+'))
-      .where((t) => t.isNotEmpty)
-      .toList();
+  final toks =
+      s.toLowerCase().split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
   if (toks.length < 4) {
     return false;
   }
@@ -108,7 +105,8 @@ List<TranscriptSegment> applyRefineTurns({
       orig.copyWith(
         text: cleaned,
         rawText: raw,
-        speaker: (speaker != null && speaker.isNotEmpty) ? speaker : orig.speaker,
+        speaker:
+            (speaker != null && speaker.isNotEmpty) ? speaker : orig.speaker,
       ),
     );
   }

@@ -52,6 +52,13 @@ void main() {
     );
   });
 
+  test('boostPcmToTargetRms lifts quiet clips and skips loud ones', () {
+    final quiet = _sine(samples: 1600, hz: 1000, amp: 200);
+    final loud = _sine(samples: 1600, hz: 1000, amp: 8000);
+    expect(pcmRms(boostPcmToTargetRms(quiet)), greaterThan(pcmRms(quiet) * 1.5));
+    expect(identical(boostPcmToTargetRms(loud), loud), isTrue);
+  });
+
   test('suggestEnergyFloor follows soft speech', () {
     final soft = _sine(samples: 16000 * 5, hz: 1000, amp: 400);
     final floor = suggestEnergyFloor(soft);

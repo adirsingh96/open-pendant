@@ -1,6 +1,6 @@
 # OpenPendant
 
-Open-source DIY AI audio pendant. Firmware is Zephyr on a Seeed XIAO nRF52840 Sense. Capture happens on the necklace; speech-to-text runs on the **phone** (OpenAI Audio API) or laptop. The MCU never holds an API key.
+Open-source DIY AI audio pendant. Firmware is Zephyr on a Seeed XIAO nRF52840 Sense. Capture happens on the necklace; speech-to-text runs on the **phone** (OpenAI Audio API) or laptop. The MCU     final models = models.isEmpty ? '' : ' · $models'; holds an API key.
 
 ## Mission
 People should be able to build their own pendant from a short BOM, flash UF2, and run a documented BLE audio protocol. Closed products (Humane Pin, Limitless) showed what happens when the cloud goes away. STT is a **host plugin** (OpenAI today, local Whisper still available on the laptop).
@@ -40,14 +40,17 @@ People should be able to build their own pendant from a short BOM, flash UF2, an
     *   bytes 1–2: LE volume
     *   byte 3: consecutive still polls (sleep at 10)
     *   bytes 4–5: LE battery millivolts (0 = no reading). App maps 3.30–4.20 V to ~0–100% **only when USB is unplugged** (charger rail is ~4.1 V with no cell).
+    *   bytes 6–7: button event + sequence (`1` single, `2` double, `3` long-down, `4` long-up). Double-click rings the connected phone.
+*   **Control UUID:** `70301104-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (WRITE). Byte 0 `1` flashes LEDs for 60 s (find pendant); `0` stops. Host uses BLE RSSI as closer/farther, not a compass heading.
 *   **Consent:** enabling Notify is recording. The red LED stays on while notify is enabled.
 
 ## Transcription pipeline (host)
 **Record** arms notify once. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local spectral VAD must see enough speech before STT. Meetings use a fixed energy floor (`1e9`, 0.5 s min); notes use the optional wearer-calibrated floor. Text is stitched by `session_id` + `seq`. WAV files are deleted after STT.
 
-*   **STT:** Saaras v4 for words. Optional OpenAI `gpt-4o-transcribe-diarize` for who spoke (Settings toggle; People samples as references). Keys on the phone only.
+*   **STT:** Saaras v4 (cloud) or on-device Qwen3-ASR 0.6B (INT8 via sherpa-onnx). Optional OpenAI `gpt-4o-transcribe-diarize` for who spoke on the Saaras path (Settings toggle; People samples as references). Meeting recap is OpenAI. Keys on the phone only.
 *   **clips:** `id`, `started_at`, `duration_s`, `full_text`, `wav_path`, `stt_model`, `status`, `session_id`, `seq`, billed/removed seconds, tokens, `cost_usd`
 *   **segments:** `start_s`, `end_s`, `spoken_at`, `text`, `speaker`
+*   **notes:** spoken text plus `due_at` / `done`. A clock in the note schedules a local notification 15 minutes before; otherwise still-open notes are in the next 8 AM digest.
 *   Later sync (not built): [docs/sync_api.md](docs/sync_api.md)
 
 Laptop A/B:

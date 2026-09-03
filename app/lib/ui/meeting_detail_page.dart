@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import '../calendar/note_command.dart';
 import '../db/meeting.dart';
 import '../db/models.dart';
+import '../notes/recap_tasks.dart';
 import '../stt/api_key_store.dart';
 import '../stt/openai_refine.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -24,12 +25,14 @@ class MeetingDetailPage extends StatefulWidget {
     required this.meeting,
     required this.onRecap,
     required this.onRename,
+    required this.onTaskDone,
     required this.reload,
   });
 
   final MeetingRecord meeting;
   final Future<void> Function() onRecap;
   final Future<void> Function(String title) onRename;
+  final Future<void> Function(String noteId, bool done) onTaskDone;
   final Future<MeetingRecord?> Function() reload;
 
   @override
@@ -49,7 +52,6 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
   bool _asking = false;
   bool _editingTitle = false;
   Timer? _sttPoll;
-  final _done = <int>{};
 
   bool get _awaitingTranscript =>
       _meeting.transcribing || (_meeting.live && !_meeting.hasSpokenText);
@@ -490,17 +492,32 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
 
   Widget _tasks({bool preview = false}) {
     final recap = _meeting.recap;
-    final items = <({String title, String meta})>[
+    final doneById = {for (final note in _meeting.notes) note.id: note.done};
+    final items = <({String id, String title, String meta})>[
       if (recap != null) ...[
         for (final f in recap.followUps)
           (
+            id: recapTaskId(
+              scope: _meeting.id,
+              kind: 'task',
+              text: f.action,
+            ),
             title: f.action,
             meta: [
               if (f.owner.trim().isNotEmpty) f.owner.trim(),
               if (f.when.trim().isNotEmpty) f.when.trim(),
             ].join(' · '),
           ),
-        for (final loop in recap.openLoops) (title: loop, meta: 'Open'),
+        for (final loop in recap.openLoops)
+          (
+            id: recapTaskId(
+              scope: _meeting.id,
+              kind: 'loop',
+              text: loop,
+            ),
+            title: loop,
+            meta: 'Open',
+          ),
       ],
     ];
     if (items.isEmpty) {
@@ -527,19 +544,20 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
           CheckboxListTile(
             contentPadding: EdgeInsets.zero,
             controlAffinity: ListTileControlAffinity.leading,
-            value: _done.contains(i),
-            onChanged: (v) => setState(() {
-              if (v == true) {
-                _done.add(i);
-              } else {
-                _done.remove(i);
+            value: doneById[items[i].id] ?? false,
+            onChanged: (v) async {
+              await widget.onTaskDone(items[i].id, v == true);
+              final next = await widget.reload();
+              if (next != null && mounted) {
+                setState(() => _meeting = next);
               }
-            }),
+            },
             title: Text(
               items[i].title,
               style: TextStyle(
-                decoration:
-                    _done.contains(i) ? TextDecoration.lineThrough : null,
+                decoration: (doneById[items[i].id] ?? false)
+                    ? TextDecoration.lineThrough
+                    : null,
               ),
             ),
             subtitle: items[i].meta.isEmpty ? null : Text(items[i].meta),
@@ -608,8 +626,7 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
                     focusedBorder: InputBorder.none,
                     filled: false,
                     isDense: true,
-                    contentPadding:
-                        const EdgeInsets.symmetric(vertical: 13),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 13),
                   ),
                   onSubmitted: (_) => _askMeeting(),
                 ),

@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'macos/sandbox_migrate.dart';
+import 'notes/note_reminders.dart';
+import 'ui/app_nav.dart';
 import 'ui/app_theme.dart';
 import 'ui/home_page.dart';
 
@@ -13,6 +15,8 @@ Future<void> main() async {
     await FlutterBluePlus.setOptions(restoreState: true);
   }
   await migrateMacosSandboxData();
+  await deleteLegacyGemmaCache();
+  await NoteReminders.init();
   runApp(const OpenPendantApp());
 }
 
@@ -23,6 +27,7 @@ class OpenPendantApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      navigatorKey: appNavigatorKey,
       theme: openPendantTheme(),
       // Every size in this UI was hand-tuned on a Mac window at desktop
       // viewing distance. A phone is held much closer, so iOS's own type

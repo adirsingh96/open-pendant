@@ -122,8 +122,7 @@ class _CalibratePageState extends State<CalibratePage> {
   Widget build(BuildContext context) {
     return PageScaffold(
       title: 'Calibrate mic',
-      caption:
-          'Wear the pendant the way you normally will and speak at your '
+      caption: 'Wear the pendant the way you normally will and speak at your '
           'usual volume. This sets a personal threshold so quiet talk is '
           'not skipped.',
       body: ListView(

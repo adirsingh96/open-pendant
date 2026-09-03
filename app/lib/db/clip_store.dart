@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../notes/reminder_parse.dart';
 import 'day_recap.dart';
 import 'meeting.dart';
 import 'memory_chat.dart';
@@ -22,7 +23,7 @@ class ClipStore {
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 10,
+      version: 11,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -131,6 +132,9 @@ CREATE TABLE clips (
           await _createMeetingsTable(db);
           await _backfillMeetings(db);
         }
+        if (oldVersion < 11) {
+          await _upgradeNoteReminders(db);
+        }
       },
     );
     await _ensureNotesTable(_db!);
@@ -163,30 +167,34 @@ CREATE TABLE segments (
   Future<void> upsertClip(ClipRecord clip) async {
     final db = await _open();
     await db.transaction((txn) async {
-      await txn.insert('clips', {
-        'id': clip.id,
-        'started_at': clip.startedAt.toUtc().toIso8601String(),
-        'duration_s': clip.durationS,
-        'full_text': clip.fullText,
-        'wav_path': clip.wavPath,
-        'stt_model': clip.sttModel,
-        'status': clip.status,
-        'session_id': clip.sessionId,
-        'seq': clip.seq,
-        'billed_s': clip.billedS,
-        'removed_s': clip.removedS,
-        'input_tokens': clip.inputTokens,
-        'output_tokens': clip.outputTokens,
-        'cost_usd': clip.costUsd,
-        'refine_input_tokens': clip.refineInputTokens,
-        'refine_output_tokens': clip.refineOutputTokens,
-        'refine_cost_usd': clip.refineCostUsd,
-        'alt_stt_model': clip.altSttModel,
-        'alt_full_text': clip.altFullText,
-        'alt_cost_usd': clip.altCostUsd,
-        'alt_error': clip.altError,
-        'alt_segments_json': jsonEncode(encodeAltSegments(clip.altSegments)),
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'clips',
+          {
+            'id': clip.id,
+            'started_at': clip.startedAt.toUtc().toIso8601String(),
+            'duration_s': clip.durationS,
+            'full_text': clip.fullText,
+            'wav_path': clip.wavPath,
+            'stt_model': clip.sttModel,
+            'status': clip.status,
+            'session_id': clip.sessionId,
+            'seq': clip.seq,
+            'billed_s': clip.billedS,
+            'removed_s': clip.removedS,
+            'input_tokens': clip.inputTokens,
+            'output_tokens': clip.outputTokens,
+            'cost_usd': clip.costUsd,
+            'refine_input_tokens': clip.refineInputTokens,
+            'refine_output_tokens': clip.refineOutputTokens,
+            'refine_cost_usd': clip.refineCostUsd,
+            'alt_stt_model': clip.altSttModel,
+            'alt_full_text': clip.altFullText,
+            'alt_cost_usd': clip.altCostUsd,
+            'alt_error': clip.altError,
+            'alt_segments_json':
+                jsonEncode(encodeAltSegments(clip.altSegments)),
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
       await txn.delete('segments', where: 'clip_id = ?', whereArgs: [clip.id]);
       for (final s in clip.segments) {
         await txn.insert('segments', {
@@ -252,7 +260,8 @@ ORDER BY c.started_at DESC
           )
         : await db.query(
             'segments',
-            where: 'spoken_at >= ? AND spoken_at <= ? AND (text LIKE ? OR raw_text LIKE ?)',
+            where:
+                'spoken_at >= ? AND spoken_at <= ? AND (text LIKE ? OR raw_text LIKE ?)',
             whereArgs: [start, end, '%$q%', '%$q%'],
             orderBy: 'spoken_at ASC',
           );
@@ -273,8 +282,7 @@ ORDER BY c.started_at DESC
           '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
       byKey[key] = day;
     }
-    final days = byKey.values.toList()
-      ..sort((a, b) => b.compareTo(a));
+    final days = byKey.values.toList()..sort((a, b) => b.compareTo(a));
     return days;
   }
 
@@ -402,7 +410,8 @@ CREATE TABLE memory_chats (
     try {
       final raw = jsonDecode(r['day_keys_json'] as String? ?? '[]');
       if (raw is List) {
-        dayKeys = raw.map((e) => '$e'.trim()).where((e) => e.isNotEmpty).toList();
+        dayKeys =
+            raw.map((e) => '$e'.trim()).where((e) => e.isNotEmpty).toList();
       }
     } catch (_) {}
     return MemoryChatTurn(
@@ -419,6 +428,7 @@ CREATE TABLE memory_chats (
   Future<void> _ensureNotesTable(DatabaseExecutor db) async {
     await _createNotesTable(db);
     await _upgradeNotesMeetingId(db);
+    await _upgradeNoteReminders(db);
   }
 
   Future<void> _ensureMeetingsSchema(DatabaseExecutor db) async {
@@ -475,27 +485,170 @@ CREATE TABLE IF NOT EXISTS notes (
   created_at TEXT NOT NULL,
   text TEXT NOT NULL,
   clip_id TEXT,
-  meeting_id TEXT
+  meeting_id TEXT,
+  done INTEGER NOT NULL DEFAULT 0,
+  due_at TEXT
 )''');
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at)',
     );
   }
 
-  Future<void> insertNote(SpokenNote note) async {
+  Future<void> _upgradeNoteReminders(DatabaseExecutor db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(notes)');
+    final names = {for (final c in cols) c['name'] as String};
+    if (!names.contains('done')) {
+      try {
+        await db.execute(
+          'ALTER TABLE notes ADD COLUMN done INTEGER NOT NULL DEFAULT 0',
+        );
+      } catch (_) {}
+    }
+    if (!names.contains('due_at')) {
+      try {
+        await db.execute('ALTER TABLE notes ADD COLUMN due_at TEXT');
+      } catch (_) {}
+    }
+  }
+
+  bool _sqlBool(Object? v) {
+    if (v is bool) {
+      return v;
+    }
+    if (v is num) {
+      return v != 0;
+    }
+    return false;
+  }
+
+  SpokenNote _noteFromRow(Map<String, Object?> r) {
+    return SpokenNote(
+      id: r['id'] as String,
+      createdAt: DateTime.tryParse(r['created_at'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      text: r['text'] as String? ?? '',
+      clipId: r['clip_id'] as String?,
+      meetingId: r['meeting_id'] as String?,
+      done: _sqlBool(r['done']),
+      dueAt: DateTime.tryParse(r['due_at'] as String? ?? ''),
+    );
+  }
+
+  Future<SpokenNote> insertNote(SpokenNote note) async {
+    // Due time is parsed for notifications only. Spoken text is stored as-is.
+    final due = note.isMoment
+        ? null
+        : note.dueAt ??
+            parseNoteReminder(note.text, now: note.createdAt.toLocal()).dueAt;
+    final stored = note.copyWith(dueAt: due, clearDueAt: due == null);
     final db = await _open();
     await db.insert('notes', {
-      'id': note.id,
-      'created_at': note.createdAt.toUtc().toIso8601String(),
-      'text': note.text,
-      'clip_id': note.clipId,
-      'meeting_id': note.meetingId,
+      'id': stored.id,
+      'created_at': stored.createdAt.toUtc().toIso8601String(),
+      'text': stored.text,
+      'clip_id': stored.clipId,
+      'meeting_id': stored.meetingId,
+      'done': stored.done ? 1 : 0,
+      'due_at': stored.dueAt?.toUtc().toIso8601String(),
     });
+    return stored;
+  }
+
+  Future<SpokenNote> insertNoteIfAbsent(SpokenNote note) async {
+    final due = note.isMoment
+        ? null
+        : note.dueAt ??
+            parseNoteReminder(note.text, now: note.createdAt.toLocal()).dueAt;
+    final stored = note.copyWith(dueAt: due, clearDueAt: due == null);
+    final db = await _open();
+    await db.insert(
+      'notes',
+      {
+        'id': stored.id,
+        'created_at': stored.createdAt.toUtc().toIso8601String(),
+        'text': stored.text,
+        'clip_id': stored.clipId,
+        'meeting_id': stored.meetingId,
+        'done': stored.done ? 1 : 0,
+        'due_at': stored.dueAt?.toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    return stored;
+  }
+
+  Future<SpokenNote> insertNoteUnlessTextExists(SpokenNote note) async {
+    final db = await _open();
+    final rows = await db.query(
+      'notes',
+      where: 'lower(trim(text)) = lower(trim(?))',
+      whereArgs: [note.text],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      return _noteFromRow(rows.first);
+    }
+    return insertNoteIfAbsent(note);
+  }
+
+  Future<void> deleteStaleRecapNotes({
+    required String scope,
+    required Iterable<String> keepIds,
+  }) async {
+    final db = await _open();
+    final keep = keepIds.toList();
+    final prefixArgs = ['task:$scope:%', 'loop:$scope:%'];
+    if (keep.isEmpty) {
+      await db.delete(
+        'notes',
+        where: '(id LIKE ? OR id LIKE ?)',
+        whereArgs: prefixArgs,
+      );
+      return;
+    }
+    final placeholders = List.filled(keep.length, '?').join(', ');
+    await db.delete(
+      'notes',
+      where: '(id LIKE ? OR id LIKE ?) AND id NOT IN ($placeholders)',
+      whereArgs: [...prefixArgs, ...keep],
+    );
   }
 
   Future<void> deleteNote(String id) async {
     final db = await _open();
     await db.delete('notes', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> updateNoteDone(String id, bool done) async {
+    final db = await _open();
+    await db.update(
+      'notes',
+      {'done': done ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> updateNoteDueAt(String id, DateTime? dueAt) async {
+    final db = await _open();
+    await db.update(
+      'notes',
+      {'due_at': dueAt?.toUtc().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<List<SpokenNote>> listPendingNotes() async {
+    final db = await _open();
+    final rows = await db.query(
+      'notes',
+      where: 'done = 0',
+      orderBy: 'created_at DESC',
+    );
+    return [
+      for (final r in rows) _noteFromRow(r),
+    ].where((n) => !n.isMoment).toList();
   }
 
   Future<List<SpokenNote>> listNotesInRange({
@@ -521,15 +674,7 @@ CREATE TABLE IF NOT EXISTS notes (
             orderBy: 'created_at DESC',
           );
     return [
-      for (final r in rows)
-        SpokenNote(
-          id: r['id'] as String,
-          createdAt: DateTime.tryParse(r['created_at'] as String? ?? '') ??
-              DateTime.fromMillisecondsSinceEpoch(0),
-          text: r['text'] as String? ?? '',
-          clipId: r['clip_id'] as String?,
-          meetingId: r['meeting_id'] as String?,
-        ),
+      for (final r in rows) _noteFromRow(r),
     ];
   }
 
@@ -604,7 +749,8 @@ CREATE TABLE IF NOT EXISTS notes (
     return _clipsForSession(db, sessionId);
   }
 
-  Future<List<ClipRecord>> _clipsForSession(Database db, String sessionId) async {
+  Future<List<ClipRecord>> _clipsForSession(
+      Database db, String sessionId) async {
     final rows = await db.query(
       'clips',
       where: 'session_id = ?',
@@ -668,15 +814,7 @@ CREATE TABLE IF NOT EXISTS notes (
         orderBy: 'created_at DESC',
       );
       final notes = [
-        for (final n in noteRows)
-          SpokenNote(
-            id: n['id'] as String,
-            createdAt: DateTime.tryParse(n['created_at'] as String? ?? '') ??
-                DateTime.fromMillisecondsSinceEpoch(0),
-            text: n['text'] as String? ?? '',
-            clipId: n['clip_id'] as String?,
-            meetingId: n['meeting_id'] as String?,
-          ),
+        for (final n in noteRows) _noteFromRow(n),
       ];
       final meeting = MeetingRecord(
         id: id,
@@ -828,15 +966,19 @@ CREATE TABLE day_recaps (
     required int outputTokens,
   }) async {
     final db = await _open();
-    await db.insert('day_recaps', {
-      'day_key': recap.dayKey,
-      'body_json': jsonEncode(recap.toJson()),
-      'model': recap.model,
-      'input_tokens': inputTokens,
-      'output_tokens': outputTokens,
-      'cost_usd': recap.costUsd,
-      'updated_at': (recap.updatedAt ?? DateTime.now().toUtc()).toIso8601String(),
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    await db.insert(
+        'day_recaps',
+        {
+          'day_key': recap.dayKey,
+          'body_json': jsonEncode(recap.toJson()),
+          'model': recap.model,
+          'input_tokens': inputTokens,
+          'output_tokens': outputTokens,
+          'cost_usd': recap.costUsd,
+          'updated_at':
+              (recap.updatedAt ?? DateTime.now().toUtc()).toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   /// Home list: session groups (newest first) plus standalone clips.
@@ -926,7 +1068,8 @@ CREATE TABLE day_recaps (
     return clipSum + recapSum;
   }
 
-  Future<({double billedS, int inputTokens, int outputTokens})> totalUsage() async {
+  Future<({double billedS, int inputTokens, int outputTokens})>
+      totalUsage() async {
     final db = await _open();
     final rows = await db.rawQuery('''
 SELECT COALESCE(SUM(billed_s), 0) AS billed,

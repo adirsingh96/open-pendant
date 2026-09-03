@@ -80,6 +80,7 @@ String noteTextWithoutSpeakers(String text) {
   }
   return t;
 }
+
 String? calendarNoteFromText(String text) {
   var t = text.trim();
   if (t.isEmpty) {

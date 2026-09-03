@@ -41,6 +41,7 @@ class SaarasStt {
     required double billedSeconds,
   }) async {
     final req = http.MultipartRequest('POST', Uri.parse(_rest));
+    req.persistentConnection = false;
     req.headers['api-subscription-key'] = apiKey;
     req.fields['model'] = modelId;
     req.fields['mode'] = 'transcribe';
@@ -52,7 +53,8 @@ class SaarasStt {
         filename: 'clip.wav',
       ),
     );
-    final streamed = await _client.send(req).timeout(const Duration(seconds: 120));
+    final streamed =
+        await _client.send(req).timeout(const Duration(seconds: 120));
     final body = await streamed.stream.bytesToString();
     if (streamed.statusCode >= 400) {
       throw Exception('saaras:v4 REST ${streamed.statusCode}: $body');
@@ -68,6 +70,28 @@ class SaarasStt {
   }
 }
 
+bool isSaarasAuthError(Object error) {
+  final text = error.toString().toLowerCase();
+  return text.contains('no keys added') ||
+      text.contains('server key') ||
+      text.contains('rest 401') ||
+      text.contains('rest 403');
+}
+
+String friendlySaarasError(Object error) {
+  final text = error.toString();
+  if (isSaarasAuthError(error)) {
+    return 'Sarvam could not read the saved key. Please retry.';
+  }
+  if (text.toLowerCase().contains('timeout')) {
+    return 'Sarvam timed out. The clip can be retried.';
+  }
+  final status = RegExp(r'REST (\d{3})').firstMatch(text)?.group(1);
+  return status == null
+      ? 'Transcription failed. Please retry.'
+      : 'Sarvam transcription failed ($status).';
+}
+
 /// REST has no speaker-reference upload. Map enrolled People onto Saaras
 /// turns: unlabeled speech is the first voice (wearer); Speaker 1/2… follow
 /// enrollment order when diarized ids are present.
@@ -75,10 +99,8 @@ TranscriptResult applySaarasVoiceTags(
   TranscriptResult from,
   List<VoiceProfile> voices,
 ) {
-  final names = voices
-      .map((v) => v.name.trim())
-      .where((n) => n.isNotEmpty)
-      .toList();
+  final names =
+      voices.map((v) => v.name.trim()).where((n) => n.isNotEmpty).toList();
   if (names.isEmpty || from.segments.isEmpty) {
     return from;
   }
@@ -86,10 +108,8 @@ TranscriptResult applySaarasVoiceTags(
     for (final s in from.segments)
       s.copyWith(speaker: mapSaarasSpeaker(s.speaker, names)),
   ];
-  final labeled = segs
-      .map((s) => s.labeledText)
-      .where((t) => t.isNotEmpty)
-      .join(' ');
+  final labeled =
+      segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
   return TranscriptResult(
     text: labeled.isNotEmpty ? labeled : from.text,
     model: from.model,
@@ -123,6 +143,7 @@ TranscriptResult parseSaarasTranscript({
   required double billedSeconds,
 }) {
   final segs = <TranscriptSegment>[];
+  final full = (json['transcript'] as String? ?? '').trim();
   final diar = json['diarized_transcript'];
   if (diar is Map && diar['entries'] is List) {
     for (final item in diar['entries'] as List) {
@@ -147,6 +168,27 @@ TranscriptResult parseSaarasTranscript({
         ),
       );
     }
+  }
+  // Word timestamps are often split badly for Hindi. Prefer the API's
+  // `transcript` string as-is; keep timestamps only for the time span.
+  if (segs.isEmpty && full.isNotEmpty) {
+    var start = 0.0;
+    var end = billedSeconds;
+    final span = _timestampSpan(json['timestamps']);
+    if (span != null) {
+      start = span.$1;
+      end = span.$2;
+    }
+    segs.add(
+      _seg(
+        start: start,
+        end: end > start ? end : billedSeconds,
+        text: full,
+        speaker: null,
+        startedAt: startedAt,
+        speech: speech,
+      ),
+    );
   }
   if (segs.isEmpty) {
     final ts = json['timestamps'];
@@ -179,25 +221,14 @@ TranscriptResult parseSaarasTranscript({
       }
     }
   }
-  final full = (json['transcript'] as String? ?? '').trim();
-  if (segs.isEmpty && full.isNotEmpty) {
-    segs.add(
-      _seg(
-        start: 0,
-        end: billedSeconds,
-        text: full,
-        speaker: null,
-        startedAt: startedAt,
-        speech: speech,
-      ),
-    );
-  }
-  final labeled = segs
-      .map((s) => s.labeledText)
-      .where((t) => t.isNotEmpty)
-      .join(' ');
+  final labeled =
+      segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
   return TranscriptResult(
-    text: labeled.isNotEmpty ? labeled : full,
+    text: full.isNotEmpty
+        ? (segs.any((s) => (s.speaker ?? '').trim().isNotEmpty)
+            ? (labeled.isNotEmpty ? labeled : full)
+            : full)
+        : (labeled.isNotEmpty ? labeled : full),
     model: model,
     segments: segs,
     costUsd: SttPricing.usd(
@@ -205,6 +236,20 @@ TranscriptResult parseSaarasTranscript({
       billedSeconds: billedSeconds,
     ),
   );
+}
+
+(double, double)? _timestampSpan(Object? ts) {
+  if (ts is! Map) {
+    return null;
+  }
+  final starts = ts['start_time_seconds'];
+  final ends = ts['end_time_seconds'];
+  if (starts is! List || ends is! List || starts.isEmpty) {
+    return null;
+  }
+  final start = (starts.first as num?)?.toDouble() ?? 0;
+  final end = ends.isEmpty ? start : (ends.last as num?)?.toDouble() ?? start;
+  return (start, end);
 }
 
 TranscriptSegment _seg({

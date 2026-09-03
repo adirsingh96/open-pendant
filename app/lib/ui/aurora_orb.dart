@@ -77,7 +77,8 @@ class _OrbPainter extends CustomPainter {
 
     // The orb: drifting blurred color fields inside a circular clip.
     canvas.save();
-    canvas.clipPath(Path()..addOval(Rect.fromCircle(center: center, radius: r)));
+    canvas
+        .clipPath(Path()..addOval(Rect.fromCircle(center: center, radius: r)));
     canvas.drawRect(
       Rect.fromCircle(center: center, radius: r),
       Paint()..color = const Color(0xFFF3A87C),

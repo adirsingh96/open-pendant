@@ -25,8 +25,7 @@ class MeetingRecord {
 
   bool get live => endedAt == null;
 
-  bool get hasSpokenText =>
-      segments.any((s) => s.text.trim().isNotEmpty);
+  bool get hasSpokenText => segments.any((s) => s.text.trim().isNotEmpty);
 
   bool get transcribing => clips.any(
         (c) => c.status == 'transcribing' || c.status == 'refining',

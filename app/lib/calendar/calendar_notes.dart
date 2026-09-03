@@ -20,14 +20,14 @@ Future<CalendarNoteResult> addNoteToGoogleCalendar(String note) async {
     final start = DateTime.now().toUtc();
     final end = start.add(const Duration(minutes: 30));
     final created = await CalendarApi(client).events.insert(
-      Event(
-        summary: calendarEventTitle(body),
-        description: '$body\n\nOpenPendant',
-        start: EventDateTime(dateTime: start, timeZone: 'UTC'),
-        end: EventDateTime(dateTime: end, timeZone: 'UTC'),
-      ),
-      'primary',
-    );
+          Event(
+            summary: calendarEventTitle(body),
+            description: '$body\n\nOpenPendant',
+            start: EventDateTime(dateTime: start, timeZone: 'UTC'),
+            end: EventDateTime(dateTime: end, timeZone: 'UTC'),
+          ),
+          'primary',
+        );
     final link = created.htmlLink?.trim() ?? '';
     return CalendarNoteResult(
       ok: true,

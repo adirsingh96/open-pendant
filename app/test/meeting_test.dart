@@ -19,7 +19,7 @@ void main() {
       endedAt: start.add(const Duration(minutes: 45)),
     );
     expect(done.live, isFalse);
-    expect(done.timeRangeLabel().contains('–'), isTrue);
+    expect(done.timeRangeLabel(), contains(' to '));
   });
 
   test('meeting preview prefers recap headline', () {

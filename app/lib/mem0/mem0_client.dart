@@ -162,8 +162,8 @@ class Mem0Client {
     try {
       final listed = await _list(apiKey: apiKey, userId: userId);
       for (final hit in listed) {
-        final sameDay = hit.dayKey == dayKey ||
-            hit.memory.contains('day_key=$dayKey');
+        final sameDay =
+            hit.dayKey == dayKey || hit.memory.contains('day_key=$dayKey');
         if (!sameDay || hit.id.isEmpty) {
           continue;
         }
@@ -217,8 +217,7 @@ class Mem0Client {
 }
 
 List<Mem0Hit> hitsFromRecaps(List<DayRecap> recaps) {
-  final ordered = [...recaps]
-    ..sort((a, b) {
+  final ordered = [...recaps]..sort((a, b) {
       final au = a.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
       final bu = b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
       return bu.compareTo(au);
@@ -239,7 +238,10 @@ List<Mem0Hit> mergeMemoryHits({
   required List<Mem0Hit> remote,
 }) {
   final local = hitsFromRecaps(recaps);
-  final localDays = {for (final h in local) if (h.dayKey != null) h.dayKey!};
+  final localDays = {
+    for (final h in local)
+      if (h.dayKey != null) h.dayKey!
+  };
   return [
     ...local,
     ...remote.where(

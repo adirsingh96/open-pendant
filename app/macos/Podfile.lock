@@ -1,4 +1,7 @@
 PODS:
+  - audioplayers_darwin (0.0.1):
+    - Flutter
+    - FlutterMacOS
   - flutter_blue_plus_darwin (0.0.2):
     - Flutter
     - FlutterMacOS
@@ -7,7 +10,7 @@ PODS:
   - FlutterMacOS (1.0.0)
   - record_macos (2.0.0):
     - FlutterMacOS
-  - sherpa_onnx_macos (1.13.6):
+  - sherpa_onnx_macos (1.13.7):
     - FlutterMacOS
   - sqflite_darwin (0.0.4):
     - Flutter
@@ -16,6 +19,7 @@ PODS:
     - FlutterMacOS
 
 DEPENDENCIES:
+  - audioplayers_darwin (from `Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin`)
   - flutter_blue_plus_darwin (from `Flutter/ephemeral/.symlinks/plugins/flutter_blue_plus_darwin/darwin`)
   - flutter_secure_storage_macos (from `Flutter/ephemeral/.symlinks/plugins/flutter_secure_storage_macos/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
@@ -25,6 +29,8 @@ DEPENDENCIES:
   - url_launcher_macos (from `Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos`)
 
 EXTERNAL SOURCES:
+  audioplayers_darwin:
+    :path: Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin
   flutter_blue_plus_darwin:
     :path: Flutter/ephemeral/.symlinks/plugins/flutter_blue_plus_darwin/darwin
   flutter_secure_storage_macos:
@@ -41,11 +47,12 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos
 
 SPEC CHECKSUMS:
+  audioplayers_darwin: 835ced6edd4c9fc8ebb0a7cc9e294a91d99917d5
   flutter_blue_plus_darwin: 20a08bfeaa0f7804d524858d3d8744bcc1b6dbc3
   flutter_secure_storage_macos: 7f45e30f838cf2659862a4e4e3ee1c347c2b3b54
   FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   record_macos: 2e43c16b84ce188b8137754ee648322a2dcdf7fa
-  sherpa_onnx_macos: 659c0e11722f57fe72a2fbb1314c9aaed0a82835
+  sherpa_onnx_macos: c5f2ac756922aa50ee4e1b887e55c46183eae68a
   sqflite_darwin: 20b2a3a3b70e43edae938624ce550a3cbf66a3d0
   url_launcher_macos: f87a979182d112f911de6820aefddaf56ee9fbfd
 

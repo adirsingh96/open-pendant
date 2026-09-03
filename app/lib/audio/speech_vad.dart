@@ -80,7 +80,8 @@ SpeechExtract extractSpeech(
       continue;
     }
     final a = i - padFrames < 0 ? 0 : i - padFrames;
-    final b = i + padFrames >= speech.length ? speech.length - 1 : i + padFrames;
+    final b =
+        i + padFrames >= speech.length ? speech.length - 1 : i + padFrames;
     for (var j = a; j <= b; j++) {
       padded[j] = true;
     }
@@ -167,6 +168,53 @@ double pcmRms(List<int> pcm) {
   return math.sqrt(acc / n);
 }
 
+/// Raise quiet necklace PCM toward phone-mic loudness. Phone clips already
+/// near [targetRms] are left alone.
+List<int> boostPcmToTargetRms(
+  List<int> pcm, {
+  double targetRms = 2800,
+  double maxGain = 2.5,
+}) {
+  final rms = pcmRms(pcm);
+  if (rms < 8 || rms >= targetRms) {
+    return pcm;
+  }
+  final g = math.min(maxGain, targetRms / rms);
+  final out = List<int>.from(pcm);
+  for (var i = 0; i + 1 < out.length; i += 2) {
+    var s = out[i] | (out[i + 1] << 8);
+    if (s >= 32768) {
+      s -= 65536;
+    }
+    var v = (s * g).round();
+    if (v > 32767) {
+      v = 32767;
+    } else if (v < -32768) {
+      v = -32768;
+    }
+    out[i] = v & 0xff;
+    out[i + 1] = (v >> 8) & 0xff;
+  }
+  return out;
+}
+
+SpeechExtract fullClipExtract(List<int> pcm, {int sampleRate = 16000}) {
+  final d = pcm.length / 2 / sampleRate;
+  return SpeechExtract(
+    speechPcm: pcm,
+    originalDurationS: d,
+    speechDurationS: d,
+    regions: [
+      SpeechRegion(
+        origStartS: 0,
+        origEndS: d,
+        concatStartS: 0,
+        concatEndS: d,
+      ),
+    ],
+  );
+}
+
 int _sample(List<int> pcm, int i) {
   final lo = pcm[i * 2];
   final hi = pcm[i * 2 + 1];
@@ -188,7 +236,9 @@ bool _frameIsVoice(
   if (spec == null || spec.totalPow < energyFloor) {
     return false;
   }
-  return spec.ratio >= 0.45 && spec.centroidHz >= 200 && spec.centroidHz <= 2800;
+  return spec.ratio >= 0.45 &&
+      spec.centroidHz >= 200 &&
+      spec.centroidHz <= 2800;
 }
 
 class FrameSpectrum {
@@ -279,7 +329,9 @@ double suggestEnergyFloor(List<int> pcm, {int sampleRate = 16000}) {
     if (spec == null) {
       continue;
     }
-    if (spec.ratio >= 0.4 && spec.centroidHz >= 200 && spec.centroidHz <= 2800) {
+    if (spec.ratio >= 0.4 &&
+        spec.centroidHz >= 200 &&
+        spec.centroidHz <= 2800) {
       vals.add(spec.totalPow);
     }
   }

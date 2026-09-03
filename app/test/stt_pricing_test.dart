@@ -44,4 +44,15 @@ void main() {
     );
     expect(usd, closeTo(1.25, 1e-9));
   });
+
+  test('on-device qwen asr is free', () {
+    expect(
+      SttPricing.usd(
+        model: 'qwen3-asr:0.6b',
+        billedSeconds: 600,
+        inputTokens: 1000,
+      ),
+      0,
+    );
+  });
 }

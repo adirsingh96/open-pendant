@@ -7,6 +7,14 @@ import 'package:openpendant/stt/stt_pricing.dart';
 import 'package:openpendant/stt/voice_store.dart';
 
 void main() {
+  test('recognizes and shortens Saaras missing-key errors', () {
+    final error = Exception(
+      'saaras:v4 REST 403: No keys added. Please add your server key.',
+    );
+    expect(isSaarasAuthError(error), isTrue);
+    expect(friendlySaarasError(error), contains('saved key'));
+  });
+
   test('parseSaarasTranscript uses diarized entries', () {
     final r = parseSaarasTranscript(
       json: {
@@ -39,7 +47,7 @@ void main() {
     expect(r.text, contains('Speaker 1:'));
   });
 
-  test('parseSaarasTranscript falls back to timestamp chunks', () {
+  test('parseSaarasTranscript prefers transcript over word timestamps', () {
     final r = parseSaarasTranscript(
       json: {
         'transcript': 'Hi there',
@@ -53,9 +61,28 @@ void main() {
       startedAt: DateTime.utc(2026, 8, 21, 10),
       billedSeconds: 1,
     );
-    expect(r.segments, hasLength(2));
+    expect(r.segments, hasLength(1));
     expect(r.segments[0].speaker, isNull);
-    expect(r.segments[1].text, 'there');
+    expect(r.segments[0].text, 'Hi there');
+    expect(r.text, 'Hi there');
+  });
+
+  test('parseSaarasTranscript keeps Hindi transcript not split words', () {
+    final r = parseSaarasTranscript(
+      json: {
+        'transcript': 'मेरा नाम क्या है',
+        'timestamps': {
+          'words': ['मे', 'रा', 'नाम'],
+          'start_time_seconds': [0.0, 0.2, 0.4],
+          'end_time_seconds': [0.2, 0.4, 0.8],
+        },
+      },
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      billedSeconds: 1,
+    );
+    expect(r.text, 'मेरा नाम क्या है');
+    expect(r.segments.single.text, 'मेरा नाम क्या है');
   });
 
   test('applySaarasVoiceTags uses enrolled names', () {
@@ -76,6 +103,7 @@ void main() {
       VoiceProfile(id: '1', name: 'Aditya', wavPath: '/tmp/a.wav'),
     ]);
     expect(tagged.segments.single.speaker, 'Aditya');
+    expect(tagged.segments.single.text, 'Hi there');
     expect(tagged.text, startsWith('Aditya:'));
 
     final diar = parseSaarasTranscript(

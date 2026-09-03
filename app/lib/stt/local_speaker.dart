@@ -70,8 +70,7 @@ class LocalSpeaker {
 
   static Float32List _wavToFloat(List<int> bytes) {
     var raw = Uint8List.fromList(bytes);
-    if (raw.length > 44 &&
-        String.fromCharCodes(raw.sublist(0, 4)) == 'RIFF') {
+    if (raw.length > 44 && String.fromCharCodes(raw.sublist(0, 4)) == 'RIFF') {
       raw = raw.sublist(44);
     }
     final n = raw.length ~/ 2;

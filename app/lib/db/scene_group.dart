@@ -25,8 +25,7 @@ class SceneGroup {
     return names;
   }
 
-  List<String> get displaySpeakers =>
-      speakers.where(isDisplaySpeaker).toList();
+  List<String> get displaySpeakers => speakers.where(isDisplaySpeaker).toList();
 
   static String clock(DateTime t) {
     final h = t.hour;
@@ -70,9 +69,7 @@ class SceneGroup {
     List<TranscriptSegment> input, {
     Duration gap = sceneGap,
   }) {
-    final segs = input
-        .where((s) => s.text.trim().isNotEmpty)
-        .toList()
+    final segs = input.where((s) => s.text.trim().isNotEmpty).toList()
       ..sort((a, b) => a.spokenAt.compareTo(b.spokenAt));
     if (segs.isEmpty) {
       return [];

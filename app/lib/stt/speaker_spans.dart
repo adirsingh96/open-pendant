@@ -35,7 +35,8 @@ String? speakerAtTime(double t, List<SpeakerSpan> spans) {
   return null;
 }
 
-String? _nearestSpeaker(double t, List<SpeakerSpan> spans, {required double maxDist}) {
+String? _nearestSpeaker(double t, List<SpeakerSpan> spans,
+    {required double maxDist}) {
   SpeakerSpan? near;
   var dist = 1e9;
   for (final s in spans) {
@@ -150,10 +151,8 @@ List<TranscriptSegment> sliceBySpeakerTurns(
   if (hits.length == 1) {
     return [phrase.copyWith(speaker: hits.first.name)];
   }
-  final tokens = phrase.text
-      .split(RegExp(r'\s+'))
-      .where((t) => t.isNotEmpty)
-      .toList();
+  final tokens =
+      phrase.text.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
   if (tokens.length <= 1) {
     final mid = (phrase.startS + phrase.endS) / 2;
     return [

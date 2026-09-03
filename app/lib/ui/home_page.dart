@@ -5,6 +5,7 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -12,6 +13,10 @@ import 'package:uuid/uuid.dart';
 
 import '../calendar/note_command.dart';
 import '../notes/note_prefs.dart';
+import '../notes/note_reminders.dart';
+import '../notes/recap_tasks.dart';
+import '../notes/reminder_parse.dart';
+import '../audio/find_phone.dart';
 import '../audio/speech_vad.dart';
 import '../audio/wav_writer.dart';
 import '../audio/device_mic.dart';
@@ -27,6 +32,7 @@ import '../stt/cursor_prefs.dart';
 import '../macos/cursor_composer.dart';
 import '../stt/openai_refine.dart';
 import '../stt/openai_stt.dart';
+import '../stt/local_whisper_stt.dart';
 import '../stt/saaras_stt.dart';
 import '../stt/sarvam_key_store.dart';
 import '../stt/speaker_spans.dart';
@@ -35,6 +41,8 @@ import '../stt/voice_store.dart';
 import 'clip_page.dart';
 import 'calibrate_page.dart';
 import 'developer_page.dart';
+import 'day_review_page.dart';
+import 'find_pendant_page.dart';
 import 'settings_page.dart';
 import 'voices_page.dart';
 import 'app_theme.dart';
@@ -45,7 +53,7 @@ import 'edge_glow.dart';
 import 'liquid_glass.dart';
 import 'meeting_detail_page.dart';
 import 'mesh_backdrop.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'app_nav.dart';
 
 import 'page_scaffold.dart';
 import 'pendant_chip.dart';
@@ -76,9 +84,11 @@ class _HomePageState extends State<HomePage> {
   final _store = ClipStore();
   final _stt = OpenAiStt();
   final _saaras = SaarasStt();
+  final _whisper = LocalWhisperStt();
   final _refine = OpenAiRefine();
   final _dev = DeveloperLive();
   final _search = TextEditingController();
+  final _findPhone = FindPhoneTone();
 
   String _status = '';
   bool _busy = false;
@@ -93,7 +103,11 @@ class _HomePageState extends State<HomePage> {
   bool _hadSpeechInChunk = false;
   bool _imuWasSleep = false;
   bool _autoReconnect = false;
-  bool _resumeAfterReconnect = false;
+  bool _autoConnectPaused = false;
+  bool _appForeground = true;
+  int _nearbyGen = 0;
+  int _keepGen = 0;
+  bool _findPendantOpen = false;
   PendantStatus? _dbg;
   int _bytes = 0;
   String? _sessionId;
@@ -104,8 +118,11 @@ class _HomePageState extends State<HomePage> {
   List<SpokenNote> _notes = [];
   List<TranscriptSegment> _rangeSegs = [];
   bool _cleaning = false;
+  bool _closingDay = false;
+  DayRecap? _todayRecap;
   bool _commandNext = false;
   bool _noteHolding = false;
+
   /// True when Capture on the phone started the note. Pendant status still
   /// reports `noteHeld: false`, so those packets must not end an in-app note.
   bool _noteFromApp = false;
@@ -148,28 +165,52 @@ class _HomePageState extends State<HomePage> {
     SttPrefs.load();
     CursorPrefs.load();
     NotePrefs.load();
-    PendantPrefs.load().then((_) {
-      if (mounted) {
-        setState(() {});
+    unawaited(Future.wait([
+      ApiKeyStore.read(),
+      SarvamKeyStore.read(),
+    ]));
+    PendantPrefs.load().then((_) async {
+      if (!mounted) {
+        return;
       }
+      setState(() {});
+      await _adoptRestoredLink();
+      _syncKeepLink();
+      _syncNearbyWatch();
     });
     final now = DateTime.now();
     _rangeFrom = DateTime(now.year, now.month, now.day);
     _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
     _reload();
+    NoteReminders.init().then((_) {
+      if (!mounted) {
+        return;
+      }
+      NoteReminders.syncAll(_store);
+    });
     _lifecycle = AppLifecycleListener(
+      onResume: () {
+        _appForeground = true;
+        _autoConnectPaused = false;
+        unawaited(_adoptRestoredLink());
+        _syncKeepLink();
+        _syncNearbyWatch();
+        NoteReminders.syncAll(_store);
+      },
+      onHide: () {
+        _appForeground = false;
+        _syncNearbyWatch();
+      },
       onExitRequested: () async {
         await _ble.disconnect();
         return AppExitResponse.exit;
-      },
-      onDetach: () {
-        _ble.disconnect();
       },
     );
   }
 
   @override
   void dispose() {
+    _nearbyGen++;
     _armTick?.cancel();
     _noteTick?.cancel();
     _lifecycle?.dispose();
@@ -177,6 +218,7 @@ class _HomePageState extends State<HomePage> {
     _dev.dispose();
     _ble.disconnect();
     unawaited(_deviceMic.stop());
+    _findPhone.dispose();
     super.dispose();
   }
 
@@ -221,6 +263,8 @@ class _HomePageState extends State<HomePage> {
         held = true;
       } else if (s.buttonEvent == 4) {
         held = false;
+      } else if (s.buttonEvent == 2) {
+        unawaited(_toggleFindPhone());
       } else if (s.buttonEvent == 1 && !_noteHolding && !_busy) {
         unawaited(_toggleMeeting());
       }
@@ -233,6 +277,13 @@ class _HomePageState extends State<HomePage> {
       _noteHolding = false;
       unawaited(_endButtonNote());
     }
+  }
+
+  Future<void> _toggleFindPhone() {
+    return _findPhone.toggle(
+      overlay: appNavigatorKey.currentState?.overlay,
+      skipIfPhoneMic: _usingDeviceMic || _noteUsingDeviceMic,
+    );
   }
 
   Future<void> _beginButtonNote() async {
@@ -379,16 +430,26 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// Note finished transcribing: confirm quietly and take the user to it.
-  void _onNoteSaved() {
+  void _onNoteSaved([SpokenNote? note]) {
     if (!mounted) {
       return;
+    }
+    var msg = 'Note saved';
+    if (note != null && note.dueAt != null) {
+      final fire = reminderFireAt(
+        due: note.dueAt!.toLocal(),
+        now: DateTime.now(),
+      );
+      if (fire != null) {
+        msg = 'I’ll remind you at ${DateFormat.jm().format(fire.toLocal())}';
+      }
     }
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
-      const SnackBar(
-        duration: Duration(seconds: 2),
-        content: Text('Note saved'),
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        content: Text(msg),
       ),
     );
     if (!_armed && !_noteHolding && !_showLive) {
@@ -413,11 +474,27 @@ class _HomePageState extends State<HomePage> {
     final allSegs = _search.text.trim().isEmpty
         ? segs
         : await _store.listSegmentsInRange(from: from, to: to);
-    final notes = await _store.listNotesInRange(
+    var notes = await _store.listNotesInRange(
       from: from,
       to: to,
       query: _search.text,
     );
+    final today = DateTime(now.year, now.month, now.day);
+    if (_search.text.trim().isEmpty && _sameDay(_calendarDay(from), today)) {
+      final pending = await _store.listPendingNotes();
+      final ids = {for (final n in notes) n.id};
+      notes = [
+        ...notes,
+        for (final n in pending)
+          if (!ids.contains(n.id)) n,
+      ];
+    }
+    notes.sort((a, b) {
+      if (a.done != b.done) {
+        return a.done ? 1 : -1;
+      }
+      return b.createdAt.compareTo(a.createdAt);
+    });
     final meetings = await _store.listMeetingsInRange(
       from: from,
       to: to,
@@ -430,6 +507,7 @@ class _HomePageState extends State<HomePage> {
       to: DateTime(now.year, now.month, now.day, 23, 59, 59),
     );
     final voices = await VoiceStore.list();
+    final recap = await _store.getDayRecap(_dayKey(today));
     if (!mounted) {
       return;
     }
@@ -445,6 +523,7 @@ class _HomePageState extends State<HomePage> {
       _wearerName = voices.isEmpty
           ? ''
           : voices.first.name.trim().split(RegExp(r'\s+')).first;
+      _todayRecap = recap;
     });
     _syncDev(force: true);
   }
@@ -456,6 +535,12 @@ class _HomePageState extends State<HomePage> {
 
   bool _sameDay(DateTime a, DateTime b) {
     return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  String _dayKey(DateTime day) {
+    return '${day.year.toString().padLeft(4, '0')}-'
+        '${day.month.toString().padLeft(2, '0')}-'
+        '${day.day.toString().padLeft(2, '0')}';
   }
 
   DateTime get _selectedDay {
@@ -523,13 +608,15 @@ class _HomePageState extends State<HomePage> {
     try {
       final start = meeting.startedAt.toLocal();
       final end = (meeting.endedAt ?? DateTime.now()).toLocal();
+      final dateLabel = 'Meeting ${DateFormat.MMMd().add_jm().format(start)}';
+      final rangeLabel = '${DateFormat.MMMd().add_jm().format(start)} to '
+          '${DateFormat.jm().format(end)} '
+          '(only these recorded turns; do not invent later hours)';
       final result = await _refine.cleanAndRecapDay(
         apiKey: key,
         dayKey: meeting.id,
-        dateLabel: 'Meeting ${DateFormat.MMMd().add_jm().format(start)}',
-        rangeLabel: '${DateFormat.MMMd().add_jm().format(start)} to '
-            '${DateFormat.jm().format(end)} '
-            '(only these recorded turns; do not invent later hours)',
+        dateLabel: dateLabel,
+        rangeLabel: rangeLabel,
         segments: segs,
       );
       await _store.applyCleanedSegments(result.segments);
@@ -537,6 +624,13 @@ class _HomePageState extends State<HomePage> {
         meetingId: meeting.id,
         recap: result.recap,
       );
+      await _syncRecapTasks(
+        recap: result.recap,
+        scope: meeting.id,
+        meetingId: meeting.id,
+        createdAt: meeting.startedAt,
+      );
+      await NoteReminders.syncAll(_store);
       await _reload();
       final memStatus = await _syncMem0(
         recap: result.recap,
@@ -559,6 +653,142 @@ class _HomePageState extends State<HomePage> {
         setState(() => _cleaning = false);
       }
     }
+  }
+
+  Future<void> _syncRecapTasks({
+    required DayRecap recap,
+    required String scope,
+    String? meetingId,
+    required DateTime createdAt,
+    bool dedupeByText = false,
+  }) async {
+    final notes = notesFromRecap(
+      recap: recap,
+      scope: scope,
+      meetingId: meetingId,
+      createdAt: createdAt,
+    );
+    await _store.deleteStaleRecapNotes(
+      scope: scope,
+      keepIds: notes.map((note) => note.id),
+    );
+    for (final note in notes) {
+      if (dedupeByText) {
+        await _store.insertNoteUnlessTextExists(note);
+      } else {
+        await _store.insertNoteIfAbsent(note);
+      }
+    }
+  }
+
+  Future<DayRecap?> _closeToday() async {
+    if (_closingDay) {
+      return null;
+    }
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day);
+    final end = DateTime(now.year, now.month, now.day, 23, 59, 59);
+    final key = _dayKey(start);
+    final segments = await _store.listSegmentsInRange(from: start, to: end);
+    final notes = (await _store.listNotesInRange(from: start, to: end))
+        .where((note) =>
+            !note.isMoment &&
+            !note.id.startsWith('task:') &&
+            !note.id.startsWith('loop:'))
+        .toList();
+    final turns = <TranscriptSegment>[
+      ...segments,
+      for (final note in notes)
+        TranscriptSegment(
+          startS: 0,
+          endS: 0,
+          spokenAt: note.createdAt,
+          text: 'Note: ${note.text}',
+          rawText: 'Note: ${note.text}',
+        ),
+    ]..sort((a, b) => a.spokenAt.compareTo(b.spokenAt));
+    if (turns.isEmpty) {
+      _toastSttFailed('Nothing to close today yet.');
+      return null;
+    }
+    final openaiKey = await ApiKeyStore.read();
+    if (openaiKey.isEmpty) {
+      _toastSttFailed('Add an OpenAI API key to close the day.');
+      return null;
+    }
+    setState(() => _closingDay = true);
+    try {
+      final first = turns.first.spokenAt.toLocal();
+      final last = turns.last.spokenAt.toLocal();
+      final result = await _refine.cleanAndRecapDay(
+        apiKey: openaiKey,
+        dayKey: key,
+        dateLabel: DateFormat.yMMMMd().format(start),
+        rangeLabel: '${DateFormat.jm().format(first)} to '
+            '${DateFormat.jm().format(last)} '
+            '(only these recorded turns; do not invent other hours)',
+        segments: turns,
+      );
+      await _store.applyCleanedSegments(result.segments);
+      await _store.upsertDayRecap(
+        recap: result.recap,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      );
+      await _syncRecapTasks(
+        recap: result.recap,
+        scope: key,
+        createdAt: now.toUtc(),
+        dedupeByText: true,
+      );
+      await NoteReminders.syncAll(_store);
+      await _reload();
+      final memStatus = await _syncMem0(
+        recap: result.recap,
+        dateLabel: DateFormat.yMMMMd().format(start),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Today is closed. $memStatus')),
+        );
+      }
+      return result.recap;
+    } catch (error) {
+      _toastSttFailed('Could not close today: $error');
+      return null;
+    } finally {
+      if (mounted) {
+        setState(() => _closingDay = false);
+      }
+    }
+  }
+
+  Future<void> _openTodayReview() async {
+    final recap = _todayRecap;
+    if (recap == null || !mounted) {
+      return;
+    }
+    final pending = await _store.listNotesInRange(
+      from: DateTime(1970),
+      to: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => DayReviewPage(
+          recap: recap,
+          notes: pending,
+          onTaskDone: (id, done) async {
+            await _store.updateNoteDone(id, done);
+            await NoteReminders.syncAll(_store);
+          },
+          onRefresh: _closeToday,
+        ),
+      ),
+    );
+    await _reload();
   }
 
   Future<String> _syncMem0({
@@ -646,30 +876,24 @@ class _HomePageState extends State<HomePage> {
         _connected = false;
         _dbg = null;
       });
+      _syncKeepLink();
       return;
     }
     if (_noteHolding && !_armed) {
-      unawaited(_failPendantNote());
+      unawaited(_failPendantNote().whenComplete(_syncKeepLink));
       return;
     }
     if (_armed) {
-      unawaited(_failPendantMeeting());
+      unawaited(_failPendantMeeting().whenComplete(_syncKeepLink));
       return;
     }
-    final wasArmed = _armed;
-    _resumeAfterReconnect = wasArmed;
     setState(() {
       _connected = false;
       _dbg = null;
       _btnSeqPrimed = false;
       _status = 'Connection lost. Reconnecting…';
     });
-    Future(() async {
-      if (wasArmed) {
-        await _disarm(flush: true, keepSession: true);
-      }
-      await _beginAutoReconnect();
-    });
+    _syncKeepLink();
   }
 
   Future<void> _failPendantNote() async {
@@ -704,7 +928,6 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _failPendantMeeting() async {
     _autoReconnect = false;
-    _resumeAfterReconnect = false;
     await _disarm(flush: true, keepSession: false);
     if (!mounted) {
       return;
@@ -724,25 +947,99 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<void> _beginAutoReconnect() async {
-    _autoReconnect = true;
-    for (var attempt = 1; attempt <= 5; attempt++) {
-      if (!mounted || !_autoReconnect) {
+  Future<void> _adoptRestoredLink() async {
+    if (!mounted || _connected || _busy || _autoConnectPaused) {
+      return;
+    }
+    try {
+      await _ble.adoptExisting();
+      if (!mounted) {
         return;
       }
-      setState(() => _status = 'Reconnecting… ($attempt/5)');
-      await Future<void>.delayed(Duration(seconds: attempt == 1 ? 2 : 3));
-      if (!mounted || !_autoReconnect) {
-        return;
+      setState(() {
+        _connected = true;
+        _autoReconnect = false;
+        _status = '';
+      });
+      unawaited(
+        PendantPrefs.markSeen(
+          deviceName: _ble.device?.platformName,
+          remoteId: _ble.device?.remoteId.str,
+        ),
+      );
+    } catch (_) {}
+  }
+
+  void _stopKeepLink() {
+    _autoReconnect = false;
+    _keepGen++;
+  }
+
+  bool _shouldKeepLink() {
+    return mounted &&
+        PendantPrefs.paired &&
+        !_connected &&
+        !_autoConnectPaused &&
+        !_findPendantOpen;
+  }
+
+  void _syncKeepLink() {
+    _keepGen++;
+    final gen = _keepGen;
+    if (!_shouldKeepLink()) {
+      _autoReconnect = false;
+      return;
+    }
+    unawaited(_keepLinkLoop(gen));
+  }
+
+  Duration _keepBackoff(int attempt) {
+    if (attempt <= 1) {
+      return const Duration(seconds: 2);
+    }
+    if (attempt == 2) {
+      return const Duration(seconds: 3);
+    }
+    if (attempt <= 5) {
+      return const Duration(seconds: 5);
+    }
+    if (attempt <= 10) {
+      return const Duration(seconds: 15);
+    }
+    return const Duration(seconds: 30);
+  }
+
+  Future<void> _keepLinkLoop(int gen) async {
+    _autoReconnect = true;
+    var attempt = 0;
+    while (gen == _keepGen && _shouldKeepLink()) {
+      attempt++;
+      if (attempt > 1 ||
+          _ble.device != null ||
+          PendantPrefs.remoteId.isNotEmpty) {
+        await Future<void>.delayed(_keepBackoff(attempt));
+      }
+      if (gen != _keepGen || !_shouldKeepLink()) {
+        break;
+      }
+      if (mounted) {
+        setState(() {
+          _busy = true;
+          _status = 'Reconnecting…';
+        });
       }
       try {
-        setState(() => _busy = true);
-        await _ble.reconnect();
-        if (!mounted) {
+        try {
+          await _ble.reconnectKnown();
+        } catch (_) {
+          if (!_appForeground) {
+            rethrow;
+          }
+          await _ble.reconnect();
+        }
+        if (!mounted || gen != _keepGen) {
           return;
         }
-        final resume = _resumeAfterReconnect;
-        _resumeAfterReconnect = false;
         _autoReconnect = false;
         setState(() {
           _connected = true;
@@ -751,30 +1048,88 @@ class _HomePageState extends State<HomePage> {
               'Reconnected to ${_ble.device?.platformName ?? 'OpenPendant'}.';
         });
         unawaited(
-          PendantPrefs.markSeen(deviceName: _ble.device?.platformName),
+          PendantPrefs.markSeen(
+            deviceName: _ble.device?.platformName,
+            remoteId: _ble.device?.remoteId.str,
+          ),
         );
-        if (resume) {
-          await _arm(resumeSession: true);
-        }
         return;
-      } catch (e) {
-        if (mounted) {
+      } catch (_) {
+        if (mounted && gen == _keepGen) {
           setState(() {
             _busy = false;
-            _status = 'Reconnect try $attempt failed. Retrying…';
+            _status = 'Reconnecting…';
           });
         }
       }
     }
-    if (!mounted) {
+    if (gen != _keepGen) {
       return;
     }
     _autoReconnect = false;
-    setState(() {
-      _busy = false;
-      _status =
-          'Could not reconnect. Tap Reconnect when the pendant is nearby.';
-    });
+    if (mounted && !_connected) {
+      setState(() => _busy = false);
+    }
+  }
+
+  bool _shouldNearbyConnect() {
+    return mounted &&
+        _appForeground &&
+        PendantPrefs.autoConnect &&
+        PendantPrefs.paired &&
+        !_connected &&
+        !_autoConnectPaused &&
+        !_autoReconnect &&
+        !_busy &&
+        !_armed &&
+        !_noteHolding &&
+        !_findPendantOpen;
+  }
+
+  void _syncNearbyWatch() {
+    _nearbyGen++;
+    final gen = _nearbyGen;
+    if (!_shouldNearbyConnect()) {
+      if (!_busy) {
+        unawaited(_ble.stopScan());
+      }
+      return;
+    }
+    unawaited(_nearbyLoop(gen));
+  }
+
+  Future<void> _nearbyLoop(int gen) async {
+    while (gen == _nearbyGen && _shouldNearbyConnect()) {
+      try {
+        if (!await _blePerms()) {
+          return;
+        }
+        if (gen != _nearbyGen || !_shouldNearbyConnect()) {
+          return;
+        }
+        await _ble.reconnect();
+        if (!mounted || gen != _nearbyGen) {
+          return;
+        }
+        _autoConnectPaused = false;
+        setState(() {
+          _connected = true;
+          _status = '';
+        });
+        unawaited(
+          PendantPrefs.markSeen(
+            deviceName: _ble.device?.platformName,
+            remoteId: _ble.device?.remoteId.str,
+          ),
+        );
+        return;
+      } catch (_) {
+        if (gen != _nearbyGen || !_shouldNearbyConnect()) {
+          return;
+        }
+        await Future<void>.delayed(const Duration(seconds: 12));
+      }
+    }
   }
 
   Future<void> _toggleMeeting() async {
@@ -812,6 +1167,10 @@ class _HomePageState extends State<HomePage> {
       _busy = true;
     });
     try {
+      unawaited(Future.wait([
+        ApiKeyStore.read(),
+        SarvamKeyStore.read(),
+      ]));
       if (!resumeSession || _sessionId == null) {
         _sessionId = const Uuid().v4();
         _seq = 0;
@@ -1006,6 +1365,7 @@ class _HomePageState extends State<HomePage> {
       _armed = false;
       _status = flush ? 'Stopping…' : 'Disarmed.';
     });
+    await Future<void>.delayed(Duration.zero);
     try {
       if (flush) {
         final pcm = _ble.reassembler.pcmBytes();
@@ -1087,6 +1447,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _sttEngineLabel() {
+    if (SttPrefs.engine == SttEngine.local) {
+      return 'Qwen3-ASR (on-device)';
+    }
     return SttPrefs.diarize ? 'Saaras+diarize' : 'Saaras v4';
   }
 
@@ -1120,6 +1483,25 @@ class _HomePageState extends State<HomePage> {
         error: null,
       );
     } catch (e) {
+      if (isSaarasAuthError(e)) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final refreshed = await SarvamKeyStore.read(refresh: true);
+        if (refreshed.isNotEmpty) {
+          try {
+            return (
+              result: await _saaras.transcribe(
+                wav: wav,
+                apiKey: refreshed,
+                startedAt: startedAt,
+                speech: speech,
+              ),
+              error: null,
+            );
+          } catch (retryError) {
+            return (result: null, error: retryError);
+          }
+        }
+      }
       return (result: null, error: e);
     }
   }
@@ -1157,121 +1539,138 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     try {
-    if (sarvamKey.isEmpty) {
-      _buttonNoteIds.remove(clip.id);
-      await _store.upsertClip(clip.copyWith(status: 'error'));
-      _toastSttFailed('No Sarvam API key. Add it in Settings.');
-      return;
-    }
-
-    final full = await File(wavPath).readAsBytes();
-    final pcm =
-        full.length > 44 && String.fromCharCodes(full.sublist(0, 4)) == 'RIFF'
-            ? full.sublist(44)
-            : full;
-    final speech = extractSpeech(
-      pcm,
-      energyFloor: buttonNote
-          ? VadGate.energyFloor
-          : VadGate.meetingEnergyFloor,
-      minSpeechS: buttonNote ? 0.12 : VadGate.meetingMinSpeechS,
-    );
-    if (speech.speechDurationS <
-        (buttonNote ? 0.12 : VadGate.meetingMinSpeechS)) {
-      if (buttonNote) {
+      final local = SttPrefs.engine == SttEngine.local;
+      if (!local && sarvamKey.isEmpty) {
         _buttonNoteIds.remove(clip.id);
+        await _store.upsertClip(clip.copyWith(status: 'error'));
+        _toastSttFailed('No Sarvam API key. Add it in Settings.');
+        return;
+      }
+
+      final full = await File(wavPath).readAsBytes();
+      final pcm =
+          full.length > 44 && String.fromCharCodes(full.sublist(0, 4)) == 'RIFF'
+              ? full.sublist(44)
+              : full;
+      final gated = extractSpeech(
+        pcm,
+        energyFloor:
+            buttonNote ? VadGate.energyFloor : VadGate.meetingEnergyFloor,
+        minSpeechS: buttonNote ? 0.12 : VadGate.meetingMinSpeechS,
+      );
+      if (gated.speechDurationS <
+          (buttonNote ? 0.12 : VadGate.meetingMinSpeechS)) {
+        if (buttonNote) {
+          _buttonNoteIds.remove(clip.id);
+          await _store.upsertClip(
+            clip.copyWith(
+              status: 'note',
+              billedS: 0,
+              removedS: gated.originalDurationS,
+              costUsd: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              clearAlt: true,
+            ),
+          );
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('No speech in that note.')),
+            );
+          }
+          return;
+        }
         await _store.upsertClip(
           clip.copyWith(
-            status: 'note',
+            status: 'silence',
             billedS: 0,
-            removedS: speech.originalDurationS,
+            removedS: gated.originalDurationS,
             costUsd: 0,
             inputTokens: 0,
             outputTokens: 0,
             clearAlt: true,
           ),
         );
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('No speech in that note.')),
-          );
-        }
         return;
       }
-      await _store.upsertClip(
-        clip.copyWith(
-          status: 'silence',
-          billedS: 0,
-          removedS: speech.originalDurationS,
-          costUsd: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          clearAlt: true,
-        ),
-      );
-      return;
-    }
 
-    final speechPath = p.join(p.dirname(wavPath), '${clip.id}_speech.wav');
-    await File(speechPath)
-        .writeAsBytes(pcmToWav(pcm: speech.speechPcm), flush: true);
-    final wav = File(speechPath);
+      // Do not stitch VAD islands into the file we send. Chest PDM is
+      // quieter than the phone mic; chopping it removes consonants.
+      final speech = fullClipExtract(pcm);
+      final speechPath = p.join(p.dirname(wavPath), '${clip.id}_speech.wav');
+      await File(speechPath).writeAsBytes(pcmToWav(pcm: pcm), flush: true);
+      final wav = File(speechPath);
       TranscriptResult? openai;
-      TranscriptResult? saaras;
+      TranscriptResult? words;
       Object? openaiErr;
-      Object? saarasErr;
-      final wantDiarize =
-          SttPrefs.diarize && !buttonNote && openaiKey.isNotEmpty;
-      final saarasF = _trySaaras(
-        wav: wav,
-        apiKey: sarvamKey,
-        startedAt: clip.startedAt,
-        speech: speech,
-      );
-      final openaiF = wantDiarize
-          ? _tryOpenai(
-              wav: wav,
-              apiKey: openaiKey,
-              startedAt: clip.startedAt,
-              speech: speech,
-            )
-          : null;
-      final s = await saarasF;
-      saaras = s.result;
-      saarasErr = s.error;
-      if (openaiF != null) {
-        final o = await openaiF;
-        openai = o.result;
-        openaiErr = o.error;
-        final openaiNamed = openai != null &&
-            openai.segments.any((x) => (x.speaker ?? '').trim().isNotEmpty);
-        if (saaras != null && openaiNamed) {
-          saaras = overlayDiarization(words: saaras, diarize: openai);
+      Object? wordsErr;
+      if (SttPrefs.engine == SttEngine.local) {
+        try {
+          if (!await LocalWhisperStt.isReady()) {
+            throw Exception('Download the on-device model in Settings first.');
+          }
+          words = await _whisper.transcribe(
+            wav: wav,
+            startedAt: clip.startedAt,
+            speech: speech,
+          );
+        } catch (e) {
+          wordsErr = e;
+        }
+      } else {
+        final wantDiarize =
+            SttPrefs.diarize && !buttonNote && openaiKey.isNotEmpty;
+        final saarasF = _trySaaras(
+          wav: wav,
+          apiKey: sarvamKey,
+          startedAt: clip.startedAt,
+          speech: speech,
+        );
+        final openaiF = wantDiarize
+            ? _tryOpenai(
+                wav: wav,
+                apiKey: openaiKey,
+                startedAt: clip.startedAt,
+                speech: speech,
+              )
+            : null;
+        final s = await saarasF;
+        words = s.result;
+        wordsErr = s.error;
+        if (openaiF != null) {
+          final o = await openaiF;
+          openai = o.result;
+          openaiErr = o.error;
+          final openaiNamed = openai != null &&
+              openai.segments.any((x) => (x.speaker ?? '').trim().isNotEmpty);
+          if (words != null && openaiNamed) {
+            words = overlayDiarization(words: words, diarize: openai);
+          }
         }
       }
 
       final openaiOk = openai != null && _sttHasText(openai);
-      final saarasOk = saaras != null && _sttHasText(saaras);
+      final wordsOk = words != null && _sttHasText(words);
       final TranscriptResult? primary =
-          saarasOk ? saaras : (openaiOk ? openai : openai ?? saaras);
+          wordsOk ? words : (openaiOk ? openai : openai ?? words);
       if (primary == null || !_sttHasText(primary)) {
         if (buttonNote) {
           _buttonNoteIds.remove(clip.id);
         }
-        if (openaiErr != null || saarasErr != null) {
-          throw openaiErr ?? saarasErr!;
+        if (openaiErr != null || wordsErr != null) {
+          throw openaiErr ?? wordsErr!;
         }
         await _store.upsertClip(
           clip.copyWith(
             status: 'silence',
             fullText: '',
-            sttModel: openai?.model ?? saaras?.model,
+            sttModel: openai?.model ?? words?.model,
             segments: const [],
             billedS: speech.speechDurationS,
             removedS: speech.originalDurationS - speech.speechDurationS,
             inputTokens: openai?.inputTokens ?? 0,
             outputTokens: openai?.outputTokens ?? 0,
-            costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+            costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
             clearAlt: true,
           ),
         );
@@ -1296,12 +1695,12 @@ class _HomePageState extends State<HomePage> {
             removedS: speech.originalDurationS - speech.speechDurationS,
             inputTokens: openai?.inputTokens ?? 0,
             outputTokens: openai?.outputTokens ?? 0,
-            costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+            costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
             clearAlt: true,
           ),
         );
         if (text.isNotEmpty) {
-          await _store.insertNote(
+          final saved = await _store.insertNote(
             SpokenNote(
               id: const Uuid().v4(),
               createdAt: clip.startedAt,
@@ -1310,8 +1709,9 @@ class _HomePageState extends State<HomePage> {
               meetingId: _buttonNoteMeetingIds.remove(clip.id),
             ),
           );
+          await NoteReminders.syncAll(_store);
           await _reload();
-          _onNoteSaved();
+          _onNoteSaved(saved);
         }
         return;
       }
@@ -1331,7 +1731,7 @@ class _HomePageState extends State<HomePage> {
           removedS: speech.originalDurationS - speech.speechDurationS,
           inputTokens: openai?.inputTokens ?? 0,
           outputTokens: openai?.outputTokens ?? 0,
-          costUsd: (openai?.costUsd ?? 0) + (saaras?.costUsd ?? 0),
+          costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
           clearAlt: true,
         ),
       );
@@ -1347,7 +1747,11 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
-      _toastSttFailed();
+      _toastSttFailed(
+        e.toString().toLowerCase().contains('saaras')
+            ? friendlySaarasError(e)
+            : 'Transcription failed. Please retry.',
+      );
     } finally {
       await _discardClipAudio(clip);
     }
@@ -1453,9 +1857,8 @@ class _HomePageState extends State<HomePage> {
     final unlabeled = joinUnlabeledSegmentText(segs);
     final note = calendarNoteFromClip(
       segs: segs,
-      fallback: unlabeled.isNotEmpty
-          ? unlabeled
-          : noteTextWithoutSpeakers(fullText),
+      fallback:
+          unlabeled.isNotEmpty ? unlabeled : noteTextWithoutSpeakers(fullText),
       wearer: wearer,
     );
     if (note == null) {
@@ -1465,8 +1868,9 @@ class _HomePageState extends State<HomePage> {
     if (body.isEmpty) {
       return;
     }
+    SpokenNote saved;
     try {
-      await _store.insertNote(
+      saved = await _store.insertNote(
         SpokenNote(
           id: const Uuid().v4(),
           createdAt: DateTime.now().toUtc(),
@@ -1484,13 +1888,15 @@ class _HomePageState extends State<HomePage> {
       );
       return;
     }
+    await NoteReminders.syncAll(_store);
     await _reload();
-    _onNoteSaved();
+    _onNoteSaved(saved);
   }
 
   Future<void> _sleep() async {
-    _autoReconnect = false;
-    _resumeAfterReconnect = false;
+    _stopKeepLink();
+    _autoConnectPaused = true;
+    _nearbyGen++;
     if (_armed) {
       await _disarm(flush: true, keepSession: false);
     }
@@ -1504,6 +1910,7 @@ class _HomePageState extends State<HomePage> {
       _dbg = null;
       _status = 'Sleeping. Notify off, LED blinks. Connect to wake.';
     });
+    _syncNearbyWatch();
   }
 
   Future<void> _openSettings() async {
@@ -1526,13 +1933,23 @@ class _HomePageState extends State<HomePage> {
             Navigator.of(context).pop();
             _openMemories();
           },
+          onOpenFindPendant: () {
+            Navigator.of(context).pop();
+            _openFindPendant();
+          },
         ),
       ),
     );
     await CursorPrefs.load();
     await NotePrefs.load();
+    await PendantPrefs.load();
+    if (PendantPrefs.autoConnect) {
+      _autoConnectPaused = false;
+    }
     if (mounted) {
       setState(() {});
+      _syncKeepLink();
+      _syncNearbyWatch();
     }
   }
 
@@ -1561,6 +1978,26 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+  }
+
+  Future<void> _openFindPendant() async {
+    _findPendantOpen = true;
+    _syncKeepLink();
+    _syncNearbyWatch();
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => FindPendantPage(ble: _ble),
+        ),
+      );
+    } finally {
+      _findPendantOpen = false;
+      unawaited(_ble.setLocate(false));
+      if (mounted) {
+        _syncKeepLink();
+        _syncNearbyWatch();
+      }
+    }
   }
 
   Future<void> _openVoices() async {
@@ -1725,6 +2162,23 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) {
       return;
     }
+    final recap = meeting.recap;
+    if (recap != null) {
+      await _syncRecapTasks(
+        recap: recap,
+        scope: meeting.id,
+        meetingId: meeting.id,
+        createdAt: meeting.startedAt,
+      );
+      await _reload();
+      meeting = _meetings.firstWhere(
+        (m) => m.id == meeting.id,
+        orElse: () => meeting,
+      );
+    }
+    if (!mounted) {
+      return;
+    }
     if (developer) {
       await Navigator.of(context).push(
         MaterialPageRoute(
@@ -1747,6 +2201,10 @@ class _HomePageState extends State<HomePage> {
           meeting: meeting,
           onRecap: () => _cleanMeeting(meeting),
           onRename: (title) => _store.renameMeeting(meeting.id, title),
+          onTaskDone: (noteId, done) async {
+            await _store.updateNoteDone(noteId, done);
+            await NoteReminders.syncAll(_store);
+          },
           reload: () async {
             await _reload();
             for (final m in _meetings) {
@@ -1893,6 +2351,7 @@ class _HomePageState extends State<HomePage> {
         meetingId: _sessionId,
       ),
     );
+    await NoteReminders.syncAll(_store);
     await _reload();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1914,8 +2373,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _disconnectPendant() async {
-    _autoReconnect = false;
-    _resumeAfterReconnect = false;
+    _stopKeepLink();
+    _autoConnectPaused = true;
+    _nearbyGen++;
     if (_armed && !_usingDeviceMic) {
       await _disarm(flush: true, keepSession: false);
     }
@@ -1932,6 +2392,7 @@ class _HomePageState extends State<HomePage> {
       }
       _status = 'Disconnected. Tap Connect pendant.';
     });
+    _syncNearbyWatch();
   }
 
   Future<void> _onStartMeetingTapped() async {
@@ -1983,9 +2444,9 @@ class _HomePageState extends State<HomePage> {
       if (!await _blePerms()) {
         return 'Allow Bluetooth for OpenPendant in System Settings, then try again.';
       }
-      if (_ble.device != null) {
-        await _ble.reconnect();
-      } else {
+      try {
+        await _ble.reconnectKnown();
+      } catch (_) {
         final d = await _ble.scan();
         await _ble.connect(d);
       }
@@ -1998,7 +2459,10 @@ class _HomePageState extends State<HomePage> {
         _status = '';
       });
       unawaited(
-        PendantPrefs.markSeen(deviceName: _ble.device?.platformName),
+        PendantPrefs.markSeen(
+          deviceName: _ble.device?.platformName,
+          remoteId: _ble.device?.remoteId.str,
+        ),
       );
       return null;
     }
@@ -2020,6 +2484,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openConnectFlow() async {
+    _keepGen++;
+    _nearbyGen++;
+    await _ble.stopScan();
+    if (!mounted) {
+      return;
+    }
     await showModalBottomSheet<void>(
       context: context,
       isDismissible: false,
@@ -2031,6 +2501,10 @@ class _HomePageState extends State<HomePage> {
     );
     if (mounted) {
       setState(() {});
+      if (!_connected) {
+        _syncKeepLink();
+      }
+      _syncNearbyWatch();
     }
   }
 
@@ -2109,6 +2583,14 @@ class _HomePageState extends State<HomePage> {
                 row('Battery', battery),
                 row('Motion', motion),
                 const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(sheetCtx);
+                    unawaited(_openFindPendant());
+                  },
+                  child: const Text('Find pendant'),
+                ),
+                const SizedBox(height: 8),
                 OutlinedButton(
                   onPressed: () {
                     Navigator.pop(sheetCtx);
@@ -2180,7 +2662,12 @@ class _HomePageState extends State<HomePage> {
       final on = _tab == i;
       final color = on ? AppColors.ink : AppColors.faint;
       return InkWell(
-        onTap: () => setState(() => _tab = i),
+        onTap: () {
+          setState(() => _tab = i);
+          if (i == 0 && !_sameDay(_selectedDay, DateTime.now())) {
+            unawaited(_clearRange());
+          }
+        },
         borderRadius: BorderRadius.circular(14),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 9),
@@ -2305,13 +2792,7 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 20),
                 const AuroraOrb(size: 60),
                 const SizedBox(height: 16),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 300),
-                  child: Text(
-                    'Your personal meeting assistant.',
-                    style: AppText.sub.copyWith(fontSize: 14),
-                  ),
-                ),
+                _briefingCard(),
                 if (showStatus) ...[
                   const SizedBox(height: 10),
                   ConstrainedBox(
@@ -2346,6 +2827,89 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _briefingCard() {
+    final now = DateTime.now();
+    final pending =
+        _notes.where((note) => !note.done && !note.isMoment).toList()
+          ..sort((a, b) {
+            final ad = a.dueAt;
+            final bd = b.dueAt;
+            if (ad == null && bd == null) {
+              return b.createdAt.compareTo(a.createdAt);
+            }
+            if (ad == null) return 1;
+            if (bd == null) return -1;
+            return ad.compareTo(bd);
+          });
+    final recap = _todayRecap;
+    final hasDayContent = _rangeSegs.isNotEmpty ||
+        _notes.any((note) => _sameDay(note.createdAt.toLocal(), now));
+    String title;
+    String body;
+    if (recap != null) {
+      title = recap.headline.isEmpty ? 'Today is closed' : recap.headline;
+      final open = recap.followUps.length + recap.openLoops.length;
+      body = open == 0
+          ? 'Your day review is ready.'
+          : '$open open loop${open == 1 ? '' : 's'} from today.';
+    } else if (pending.isNotEmpty) {
+      title = now.hour < 11 ? 'Carrying forward' : 'Next up';
+      final next = reminderLabel(pending.first.text);
+      body = pending.length == 1
+          ? next
+          : '$next · ${pending.length - 1} more open';
+    } else if (_meetings.isNotEmpty) {
+      title =
+          '${_meetings.length} meeting${_meetings.length == 1 ? '' : 's'} today';
+      body =
+          'Close today when you are ready to collect decisions and follow-ups.';
+    } else {
+      title = 'Nothing is waiting';
+      body = 'Capture a thought, promise, or meeting. It will return here.';
+    }
+    final canClose = recap == null && hasDayContent && !_armed && !_closingDay;
+    return Surface(
+      radius: 18,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: recap == null ? null : _openTodayReview,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 13, 12, 13),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: AppText.label.copyWith(fontSize: 14)),
+                    const SizedBox(height: 3),
+                    Text(
+                      body,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppText.sub.copyWith(fontSize: 11.5),
+                    ),
+                  ],
+                ),
+              ),
+              if (canClose)
+                TextButton(
+                  onPressed: _closingDay ? null : _closeToday,
+                  child: Text(_closingDay ? 'Closing…' : 'Close today'),
+                )
+              else if (recap != null)
+                const Icon(
+                  LucideIcons.chevronRight,
+                  size: 16,
+                  color: AppColors.faint,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _pendantCard() {
     final state = _chipState();
     IconData icon;
@@ -2364,8 +2928,12 @@ class _HomePageState extends State<HomePage> {
         title = 'Pendant offline';
         final seen = PendantPrefs.lastSeenLabel();
         caption = seen.isEmpty
-            ? 'Tap to reconnect'
-            : 'Last seen $seen · tap to reconnect';
+            ? (PendantPrefs.autoConnect && !_autoConnectPaused
+                ? 'Waiting nearby · tap to connect now'
+                : 'Tap to reconnect')
+            : (PendantPrefs.autoConnect && !_autoConnectPaused
+                ? 'Last seen $seen · waiting nearby'
+                : 'Last seen $seen · tap to reconnect');
       case PendantChipState.connecting:
         icon = LucideIcons.bluetooth;
         title = 'Connecting';
@@ -2387,8 +2955,7 @@ class _HomePageState extends State<HomePage> {
         rec = true;
         icon = LucideIcons.audioLines;
         title = 'Recording from pendant';
-        caption =
-            _noteHolding ? 'Capturing a note' : _meetingElapsed();
+        caption = _noteHolding ? 'Capturing a note' : _meetingElapsed();
     }
     return Surface(
       radius: 18,
@@ -2511,38 +3078,39 @@ class _HomePageState extends State<HomePage> {
     final noteActive = _noteHolding || _noteTempArm || _noteUsingDeviceMic;
     return IntrinsicHeight(
       child: Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          child: _captureCard(
-            icon: _armed ? LucideIcons.audioLines : LucideIcons.mic,
-            title: _armed ? 'Recording' : 'Start meeting',
-            sub: _armed
-                ? '${_meetingElapsed()} · tap to open'
-                : 'Records and transcribes live',
-            filled: true,
-            active: _armed,
-            onTap: _busy
-                ? null
-                : _armed
-                    ? () => setState(() => _showLive = true)
-                    : _onStartMeetingTapped,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: _captureCard(
+              icon: _armed ? LucideIcons.audioLines : LucideIcons.mic,
+              title: _armed ? 'Recording' : 'Start meeting',
+              sub: _armed
+                  ? '${_meetingElapsed()} · tap to open'
+                  : 'Records and transcribes live',
+              filled: true,
+              active: _armed,
+              onTap: _busy
+                  ? null
+                  : _armed
+                      ? () => setState(() => _showLive = true)
+                      : _onStartMeetingTapped,
+            ),
           ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _captureCard(
-            icon: noteActive ? LucideIcons.circleStop : LucideIcons.notebookPen,
-            title: noteActive ? 'Recording note' : 'Take a note',
-            sub: noteActive
-                ? '${_noteElapsed()} · tap to save'
-                : 'A quick spoken thought',
-            filled: false,
-            active: noteActive,
-            onTap: _busy ? null : _toggleVoiceNote,
+          const SizedBox(width: 12),
+          Expanded(
+            child: _captureCard(
+              icon:
+                  noteActive ? LucideIcons.circleStop : LucideIcons.notebookPen,
+              title: noteActive ? 'Recording note' : 'Take a note',
+              sub: noteActive
+                  ? '${_noteElapsed()} · tap to save'
+                  : 'A quick spoken thought',
+              filled: false,
+              active: noteActive,
+              onTap: _busy ? null : _toggleVoiceNote,
+            ),
           ),
-        ),
-      ],
+        ],
       ),
     );
   }
@@ -2693,7 +3261,7 @@ class _HomePageState extends State<HomePage> {
                       searching,
                       searching
                           ? 'Try different words, or another day.'
-                          : 'Spoken notes you capture will land here.',
+                          : 'Spoken notes land here. Check one off when it is done.',
                     )
                   : ListView(
                       padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
@@ -2756,8 +3324,8 @@ class _HomePageState extends State<HomePage> {
             const BoxConstraints(minWidth: 42, minHeight: 20),
         suffixIcon: hasText
             ? IconButton(
-                icon: const Icon(LucideIcons.x,
-                    size: 15, color: AppColors.muted),
+                icon:
+                    const Icon(LucideIcons.x, size: 15, color: AppColors.muted),
                 onPressed: () {
                   _search.clear();
                   _reload();
@@ -2921,17 +3489,39 @@ class _HomePageState extends State<HomePage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(10, 12, 4, 12),
+          padding: const EdgeInsets.fromLTRB(6, 12, 4, 12),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (!n.isMoment)
+                Padding(
+                  padding: const EdgeInsets.only(top: 1, right: 6),
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: Checkbox(
+                      value: n.done,
+                      visualDensity: VisualDensity.compact,
+                      onChanged: (v) async {
+                        await _store.updateNoteDone(n.id, v == true);
+                        await NoteReminders.syncAll(_store);
+                        await _reload();
+                      },
+                    ),
+                  ),
+                ),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       noteTextWithoutSpeakers(n.text),
-                      style: AppText.body.copyWith(fontSize: 14, height: 1.45),
+                      style: AppText.body.copyWith(
+                        fontSize: 14,
+                        height: 1.45,
+                        decoration: n.done ? TextDecoration.lineThrough : null,
+                        color: n.done ? AppColors.faint : AppColors.ink,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -2946,11 +3536,12 @@ class _HomePageState extends State<HomePage> {
               ),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(LucideIcons.x,
-                    size: 14, color: AppColors.faint),
+                icon:
+                    const Icon(LucideIcons.x, size: 14, color: AppColors.faint),
                 tooltip: 'Delete note',
                 onPressed: () async {
                   await _store.deleteNote(n.id);
+                  await NoteReminders.syncAll(_store);
                   await _reload();
                 },
               ),
@@ -3225,11 +3816,22 @@ class _HomePageState extends State<HomePage> {
 
   String _noteSubtitle(SpokenNote n, Map<String, MeetingRecord> meetings) {
     final when = DateFormat.jm().format(n.createdAt.toLocal());
-    final m = n.meetingId == null ? null : meetings[n.meetingId!];
-    if (m == null) {
-      return when;
+    final bits = <String>[when];
+    if (n.done) {
+      bits.add('done');
+    } else if (n.dueAt != null) {
+      final due = n.dueAt!.toLocal();
+      final dueLabel = DateFormat.jm().format(due);
+      bits.add(
+          due.isAfter(DateTime.now()) ? 'due $dueLabel' : 'overdue $dueLabel');
+    } else if (!n.isMoment) {
+      bits.add('morning reminder');
     }
-    return '$when · in ${SceneGroup.clock(m.startedAt.toLocal())} meeting';
+    final m = n.meetingId == null ? null : meetings[n.meetingId!];
+    if (m != null) {
+      bits.add('in ${SceneGroup.clock(m.startedAt.toLocal())} meeting');
+    }
+    return bits.join(' · ');
   }
 }
 

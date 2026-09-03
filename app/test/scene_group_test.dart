@@ -40,7 +40,7 @@ void main() {
       ],
     );
     expect(scene.displaySpeakers, ['Aditya']);
-    expect(scene.timeRangeLabel(), contains('–'));
+    expect(scene.timeRangeLabel(), contains(' to '));
   });
 
   test('drops empty turns', () {
