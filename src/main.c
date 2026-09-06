@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -9,6 +10,9 @@
 #include <hal/nrf_power.h>
 #include <hal/nrf_pdm.h>
 #include <zephyr/audio/dmic.h>
+#include <zephyr/storage/disk_access.h>
+#include <zephyr/fs/fs.h>
+#include <ff.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -75,9 +79,38 @@ static volatile bool ble_ok;
 static volatile bool pcm_notify_enabled;
 static volatile bool imu_sleep;
 static volatile bool status_notify_enabled;
-static uint8_t status_buf[8];
+static uint8_t status_buf[10];
 static int last_volume;
 static int64_t locate_until;
+
+/* Control byte 0 == 2 → SD card R/W self-test (Developer). */
+#define CTRL_LOCATE_OFF 0
+#define CTRL_LOCATE_ON  1
+#define CTRL_SD_TEST    2
+
+#define SD_RES_IDLE       0
+#define SD_RES_BUSY       1
+#define SD_RES_PASS       2
+#define SD_RES_FAIL_INIT  3
+#define SD_RES_FAIL_MOUNT 4
+#define SD_RES_FAIL_WRITE 5
+#define SD_RES_FAIL_READ  6
+#define SD_RES_FAIL_MATCH 7
+
+#define SD_DISK_NAME "SD"
+#define SD_MOUNT_PT  "/SD:"
+#define SD_TEST_PATH "/SD:/opentest.txt"
+#define SD_TEST_MARK "OpenPendant SD OK\n"
+
+static uint8_t sd_result = SD_RES_IDLE;
+static uint8_t sd_detail;
+static FATFS sd_fat;
+static struct fs_mount_t sd_mnt = {
+	.type = FS_FATFS,
+	.fs_data = &sd_fat,
+	.mnt_point = SD_MOUNT_PT,
+};
+static bool sd_mounted;
 static void led_set(const struct gpio_dt_spec *l, int on)
 {
 	if (gpio_is_ready_dt(l)) {
@@ -255,12 +288,12 @@ static void btn_setup(void)
 	int err;
 
 	if (!gpio_is_ready_dt(&user_btn)) {
-		printk("Button D10 (P1.15) not ready\n");
+		printk("Button D1 (P0.03) not ready\n");
 		return;
 	}
 	err = gpio_pin_configure_dt(&user_btn, GPIO_INPUT);
 	if (err) {
-		printk("Button D10 configure failed (%d)\n", err);
+		printk("Button D1 configure failed (%d)\n", err);
 		return;
 	}
 	btn_ok = true;
@@ -270,7 +303,7 @@ static void btn_setup(void)
 	btn_press_ms = k_uptime_get();
 	btn_long_done = btn_pressed;
 	k_timer_start(&btn_timer, K_MSEC(10), K_MSEC(10));
-	printk("Button D10 ready (NO→D10, COM→GND, internal pull-up)\n");
+	printk("Button D1 ready (NO→D1, COM→GND, internal pull-up)\n");
 }
 
 #define IMU_HIST 16
@@ -460,6 +493,116 @@ static uint16_t battery_sample_mv(void)
 	return battery_mv;
 }
 
+static void sd_unmount(void)
+{
+	if (sd_mounted) {
+		fs_unmount(&sd_mnt);
+		sd_mounted = false;
+	}
+	(void)disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_DEINIT, NULL);
+}
+
+static void sd_set_result(uint8_t result, uint8_t detail)
+{
+	sd_result = result;
+	sd_detail = detail;
+	status_notify(last_volume);
+}
+
+static void sd_test_work_fn(struct k_work *work)
+{
+	struct fs_file_t file;
+	char path[40];
+	char wr[48];
+	char rd[48];
+	ssize_t n;
+	int err;
+	uint32_t sectors = 0;
+	uint32_t ssize = 0;
+	size_t wr_len;
+
+	ARG_UNUSED(work);
+
+	printk("SD test start (CS=D6 CLK=D9 MOSI=D8 MISO=D7)\n");
+	sd_unmount();
+
+	err = disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_INIT, NULL);
+	if (err != 0) {
+		printk("SD init failed (%d)\n", err);
+		sd_set_result(SD_RES_FAIL_INIT, (uint8_t)(-err));
+		return;
+	}
+
+	(void)disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_GET_SECTOR_COUNT,
+				&sectors);
+	(void)disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_GET_SECTOR_SIZE,
+				&ssize);
+	printk("SD ready: %u sectors × %u B\n", sectors, ssize);
+
+	err = fs_mount(&sd_mnt);
+	if (err != 0) {
+		printk("SD mount failed (%d) — format FAT32?\n", err);
+		(void)disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_DEINIT,
+					NULL);
+		sd_set_result(SD_RES_FAIL_MOUNT, (uint8_t)(-err));
+		return;
+	}
+	sd_mounted = true;
+
+	snprintk(wr, sizeof(wr), "%s%u", SD_TEST_MARK,
+		 (unsigned int)k_uptime_get_32());
+	wr_len = strlen(wr);
+
+	fs_file_t_init(&file);
+	err = fs_open(&file, SD_TEST_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (err != 0) {
+		printk("SD open write failed (%d)\n", err);
+		sd_unmount();
+		sd_set_result(SD_RES_FAIL_WRITE, (uint8_t)(-err));
+		return;
+	}
+	n = fs_write(&file, wr, wr_len);
+	fs_close(&file);
+	if (n < 0 || (size_t)n != wr_len) {
+		printk("SD write failed (%d)\n", (int)n);
+		sd_unmount();
+		sd_set_result(SD_RES_FAIL_WRITE,
+			      n < 0 ? (uint8_t)(-n) : 1);
+		return;
+	}
+
+	memset(rd, 0, sizeof(rd));
+	fs_file_t_init(&file);
+	err = fs_open(&file, SD_TEST_PATH, FS_O_READ);
+	if (err != 0) {
+		printk("SD open read failed (%d)\n", err);
+		sd_unmount();
+		sd_set_result(SD_RES_FAIL_READ, (uint8_t)(-err));
+		return;
+	}
+	n = fs_read(&file, rd, sizeof(rd) - 1);
+	fs_close(&file);
+	if (n < 0) {
+		printk("SD read failed (%d)\n", (int)n);
+		sd_unmount();
+		sd_set_result(SD_RES_FAIL_READ, (uint8_t)(-n));
+		return;
+	}
+	if ((size_t)n != wr_len || memcmp(rd, wr, wr_len) != 0) {
+		printk("SD mismatch wrote='%s' read='%s'\n", wr, rd);
+		sd_unmount();
+		sd_set_result(SD_RES_FAIL_MATCH, 0);
+		return;
+	}
+
+	strncpy(path, SD_TEST_PATH, sizeof(path));
+	printk("SD PASS wrote+read %s (%u bytes)\n", path, (unsigned)wr_len);
+	sd_unmount();
+	sd_set_result(SD_RES_PASS, 0);
+}
+
+static K_WORK_DEFINE(sd_test_work, sd_test_work_fn);
+
 static void status_fill(int volume)
 {
 	int v = volume;
@@ -481,6 +624,8 @@ static void status_fill(int volume)
 	sys_put_le16(battery_sample_mv(), &status_buf[4]);
 	status_buf[6] = btn_event;
 	status_buf[7] = btn_seq;
+	status_buf[8] = sd_result;
+	status_buf[9] = sd_detail;
 }
 
 static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -504,7 +649,19 @@ static ssize_t control_write(struct bt_conn *conn,
 	if (offset != 0 || len < 1) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	if (p[0] != 0) {
+	if (p[0] == CTRL_SD_TEST) {
+		if (sd_result == SD_RES_BUSY) {
+			printk("SD test already running\n");
+			return len;
+		}
+		sd_result = SD_RES_BUSY;
+		sd_detail = 0;
+		status_notify(last_volume);
+		k_work_submit(&sd_test_work);
+		printk("SD test queued\n");
+		return len;
+	}
+	if (p[0] == CTRL_LOCATE_ON) {
 		locate_until = k_uptime_get() + 60000;
 		printk("Locate ON\n");
 	} else {

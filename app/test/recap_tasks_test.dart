@@ -33,5 +33,7 @@ void main() {
     expect(notes, hasLength(2));
     expect(notes[0].id, startsWith('task:2026-09-04:'));
     expect(notes[1].id, startsWith('loop:2026-09-04:'));
+    expect(notes[0].kind, 'todo');
+    expect(notes[1].kind, 'todo');
   });
 }

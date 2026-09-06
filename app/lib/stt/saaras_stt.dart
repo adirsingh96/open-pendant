@@ -1,20 +1,31 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
 
 import '../audio/speech_vad.dart';
+import '../audio/wav_writer.dart';
 import '../db/models.dart';
 import 'stt_pricing.dart';
 import 'voice_store.dart';
 
 /// Sarvam Saaras v4 REST. Speaker diarization is Batch-only and too slow
 /// for live ≤30s pendant clips, so live capture uses REST timestamps.
+///
+/// REST rejects audio longer than 30s; we stay under that with ~28s chunks.
 class SaarasStt {
   SaarasStt({http.Client? client}) : _client = client ?? http.Client();
 
   static const modelId = 'saaras:v4';
   static const _rest = 'https://api.sarvam.ai/speech-to-text';
+
+  /// Exclusive 30s API cap — use a margin so boundary clips still succeed.
+  static const maxRestSeconds = 28.0;
+  static const sampleRate = 16000;
+  static const bytesPerSample = 2;
 
   final http.Client _client;
 
@@ -24,12 +35,59 @@ class SaarasStt {
     required DateTime startedAt,
     SpeechExtract? speech,
   }) async {
-    return _restTranscribe(
-      wav: wav,
-      apiKey: apiKey,
-      startedAt: startedAt,
-      speech: speech,
-      billedSeconds: speech?.speechDurationS ?? 0,
+    final bytes = await wav.readAsBytes();
+    final pcm = wavPcmBytes(bytes);
+    final durationS = pcmDurationSeconds(pcm);
+    final billedTotal = speech?.speechDurationS ?? durationS;
+    if (durationS <= maxRestSeconds + 1e-6) {
+      return _restTranscribe(
+        wav: wav,
+        apiKey: apiKey,
+        startedAt: startedAt,
+        speech: speech,
+        concatOffsetS: 0,
+        billedSeconds: billedTotal,
+      );
+    }
+
+    final parts = <TranscriptResult>[];
+    final ranges = saarasRestPcmRanges(pcm.length);
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    for (var i = 0; i < ranges.length; i++) {
+      final (start, end) = ranges[i];
+      final offsetS = start / (sampleRate * bytesPerSample);
+      final chunkPcm = pcm.sublist(start, end);
+      final chunkPath = p.join(
+        Directory.systemTemp.path,
+        'saaras_${stamp}_$i.wav',
+      );
+      final chunkFile = File(chunkPath);
+      try {
+        await chunkFile.writeAsBytes(
+          pcmToWav(pcm: chunkPcm, sampleRate: sampleRate),
+          flush: true,
+        );
+        final chunkBilled = chunkPcm.length / (sampleRate * bytesPerSample);
+        parts.add(
+          await _restTranscribe(
+            wav: chunkFile,
+            apiKey: apiKey,
+            startedAt: startedAt,
+            speech: speech,
+            concatOffsetS: offsetS,
+            billedSeconds: chunkBilled,
+          ),
+        );
+      } finally {
+        if (await chunkFile.exists()) {
+          await chunkFile.delete();
+        }
+      }
+    }
+    return mergeSaarasChunkResults(
+      parts,
+      model: modelId,
+      billedSeconds: billedTotal,
     );
   }
 
@@ -38,6 +96,7 @@ class SaarasStt {
     required String apiKey,
     required DateTime startedAt,
     SpeechExtract? speech,
+    required double concatOffsetS,
     required double billedSeconds,
   }) async {
     final req = http.MultipartRequest('POST', Uri.parse(_rest));
@@ -65,9 +124,92 @@ class SaarasStt {
       model: modelId,
       startedAt: startedAt,
       speech: speech,
+      concatOffsetS: concatOffsetS,
       billedSeconds: billedSeconds,
     );
   }
+}
+
+/// Even byte ranges for mono 16-bit PCM, each ≤ [SaarasStt.maxRestSeconds].
+List<(int start, int end)> saarasRestPcmRanges(
+  int pcmLength, {
+  double maxSeconds = SaarasStt.maxRestSeconds,
+  int sampleRate = SaarasStt.sampleRate,
+  int bytesPerSample = SaarasStt.bytesPerSample,
+}) {
+  if (pcmLength <= 0) {
+    return const [];
+  }
+  var maxBytes = (maxSeconds * sampleRate * bytesPerSample).floor();
+  if (maxBytes % 2 != 0) {
+    maxBytes -= 1;
+  }
+  if (maxBytes <= 0) {
+    return [(0, pcmLength - (pcmLength % 2))];
+  }
+  final out = <(int, int)>[];
+  var start = 0;
+  while (start < pcmLength) {
+    var end = math.min(start + maxBytes, pcmLength);
+    if ((end - start) % 2 != 0) {
+      end -= 1;
+    }
+    if (end <= start) {
+      break;
+    }
+    out.add((start, end));
+    start = end;
+  }
+  return out;
+}
+
+Uint8List wavPcmBytes(List<int> wavOrPcm) {
+  if (wavOrPcm.length > 44 &&
+      String.fromCharCodes(wavOrPcm.sublist(0, 4)) == 'RIFF') {
+    return Uint8List.fromList(wavOrPcm.sublist(44));
+  }
+  return Uint8List.fromList(wavOrPcm);
+}
+
+double pcmDurationSeconds(
+  List<int> pcm, {
+  int sampleRate = SaarasStt.sampleRate,
+  int bytesPerSample = SaarasStt.bytesPerSample,
+}) {
+  if (pcm.isEmpty || bytesPerSample <= 0) {
+    return 0;
+  }
+  return pcm.length / (sampleRate * bytesPerSample);
+}
+
+TranscriptResult mergeSaarasChunkResults(
+  List<TranscriptResult> parts, {
+  required String model,
+  required double billedSeconds,
+}) {
+  final segs = <TranscriptSegment>[
+    for (final part in parts) ...part.segments,
+  ];
+  final texts = parts
+      .map((p) => p.text.trim())
+      .where((t) => t.isNotEmpty)
+      .toList();
+  final labeled =
+      segs.map((s) => s.labeledText).where((t) => t.isNotEmpty).join(' ');
+  final full = texts.join(' ').trim();
+  return TranscriptResult(
+    text: full.isNotEmpty
+        ? (segs.any((s) => (s.speaker ?? '').trim().isNotEmpty)
+            ? (labeled.isNotEmpty ? labeled : full)
+            : full)
+        : labeled,
+    model: model,
+    segments: segs,
+    costUsd: SttPricing.usd(
+      model: model,
+      billedSeconds: billedSeconds,
+    ),
+  );
 }
 
 bool isSaarasAuthError(Object error) {
@@ -78,10 +220,21 @@ bool isSaarasAuthError(Object error) {
       text.contains('rest 403');
 }
 
+bool isSaarasDurationError(Object error) {
+  final text = error.toString().toLowerCase();
+  return text.contains('duration') ||
+      text.contains('maximum limit') ||
+      text.contains('too long') ||
+      text.contains('exceeds');
+}
+
 String friendlySaarasError(Object error) {
   final text = error.toString();
   if (isSaarasAuthError(error)) {
     return 'Sarvam could not read the saved key. Please retry.';
+  }
+  if (isSaarasDurationError(error)) {
+    return 'That clip was too long for Sarvam in one piece. Try again — longer notes are split automatically.';
   }
   if (text.toLowerCase().contains('timeout')) {
     return 'Sarvam timed out. The clip can be retried.';
@@ -140,6 +293,7 @@ TranscriptResult parseSaarasTranscript({
   required String model,
   required DateTime startedAt,
   SpeechExtract? speech,
+  double concatOffsetS = 0,
   required double billedSeconds,
 }) {
   final segs = <TranscriptSegment>[];
@@ -155,8 +309,11 @@ TranscriptResult parseSaarasTranscript({
       if (text.isEmpty) {
         continue;
       }
-      final start = (m['start_time_seconds'] as num?)?.toDouble() ?? 0;
-      final end = (m['end_time_seconds'] as num?)?.toDouble() ?? start;
+      final start =
+          ((m['start_time_seconds'] as num?)?.toDouble() ?? 0) + concatOffsetS;
+      final end =
+          ((m['end_time_seconds'] as num?)?.toDouble() ?? (start - concatOffsetS)) +
+              concatOffsetS;
       segs.add(
         _seg(
           start: start,
@@ -172,17 +329,17 @@ TranscriptResult parseSaarasTranscript({
   // Word timestamps are often split badly for Hindi. Prefer the API's
   // `transcript` string as-is; keep timestamps only for the time span.
   if (segs.isEmpty && full.isNotEmpty) {
-    var start = 0.0;
-    var end = billedSeconds;
+    var start = concatOffsetS;
+    var end = concatOffsetS + billedSeconds;
     final span = _timestampSpan(json['timestamps']);
     if (span != null) {
-      start = span.$1;
-      end = span.$2;
+      start = span.$1 + concatOffsetS;
+      end = span.$2 + concatOffsetS;
     }
     segs.add(
       _seg(
         start: start,
-        end: end > start ? end : billedSeconds,
+        end: end > start ? end : concatOffsetS + billedSeconds,
         text: full,
         speaker: null,
         startedAt: startedAt,
@@ -203,10 +360,12 @@ TranscriptResult parseSaarasTranscript({
           if (text.isEmpty) {
             continue;
           }
-          final start =
-              i < starts.length ? (starts[i] as num?)?.toDouble() ?? 0 : 0.0;
-          final end =
-              i < ends.length ? (ends[i] as num?)?.toDouble() ?? start : start;
+          final start = concatOffsetS +
+              (i < starts.length ? (starts[i] as num?)?.toDouble() ?? 0 : 0.0);
+          final end = concatOffsetS +
+              (i < ends.length
+                  ? (ends[i] as num?)?.toDouble() ?? (start - concatOffsetS)
+                  : (start - concatOffsetS));
           segs.add(
             _seg(
               start: start,

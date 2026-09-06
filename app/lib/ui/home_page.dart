@@ -13,6 +13,7 @@ import 'package:uuid/uuid.dart';
 
 import '../calendar/note_command.dart';
 import '../notes/note_prefs.dart';
+import '../notes/note_kind.dart';
 import '../notes/note_reminders.dart';
 import '../notes/recap_tasks.dart';
 import '../notes/reminder_parse.dart';
@@ -72,7 +73,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  static const _maxChunkBytes = 30 * 16000 * 2;
+  // Stay under Sarvam REST's exclusive 30s cap (see SaarasStt.maxRestSeconds).
+  static const _maxChunkBytes = 28 * 16000 * 2;
   static const _quietRotate = Duration(seconds: 8);
   static const _cursorQuietRotate = Duration(milliseconds: 1500);
   static const _noPcmRotate = Duration(seconds: 2);
@@ -136,6 +138,9 @@ class _HomePageState extends State<HomePage> {
   bool _btnSeqPrimed = false;
   int _tab = 0;
   int _libTab = 0;
+
+  /// 0 = all, 1 = thoughts, 2 = to-dos.
+  int _notesFilter = 0;
   bool _showLive = false;
   String _wearerName = '';
   List<double> _levels = [];
@@ -434,14 +439,17 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) {
       return;
     }
-    var msg = 'Note saved';
-    if (note != null && note.dueAt != null) {
-      final fire = reminderFireAt(
-        due: note.dueAt!.toLocal(),
-        now: DateTime.now(),
-      );
-      if (fire != null) {
-        msg = 'I’ll remind you at ${DateFormat.jm().format(fire.toLocal())}';
+    var msg = 'Thought saved';
+    if (note != null && note.isTodo) {
+      msg = 'To do saved';
+      if (note.dueAt != null) {
+        final fire = reminderFireAt(
+          due: note.dueAt!.toLocal(),
+          now: DateTime.now(),
+        );
+        if (fire != null) {
+          msg = 'I’ll remind you at ${DateFormat.jm().format(fire.toLocal())}';
+        }
       }
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -456,6 +464,9 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _tab = 1;
         _libTab = 1;
+        if (note != null) {
+          _notesFilter = note.isTodo ? 2 : 1;
+        }
       });
     }
   }
@@ -1962,6 +1973,7 @@ class _HomePageState extends State<HomePage> {
           builder: (context, _) => DeveloperPage(
             live: _dev,
             rangeBar: _rangeBar(),
+            onSdTest: _ble.isConnected ? _ble.runSdTest : null,
           ),
         ),
       ),
@@ -2829,18 +2841,19 @@ class _HomePageState extends State<HomePage> {
 
   Widget _briefingCard() {
     final now = DateTime.now();
-    final pending =
-        _notes.where((note) => !note.done && !note.isMoment).toList()
-          ..sort((a, b) {
-            final ad = a.dueAt;
-            final bd = b.dueAt;
-            if (ad == null && bd == null) {
-              return b.createdAt.compareTo(a.createdAt);
-            }
-            if (ad == null) return 1;
-            if (bd == null) return -1;
-            return ad.compareTo(bd);
-          });
+    final pending = _notes
+        .where((note) => note.isTodo && !note.done && !note.isMoment)
+        .toList()
+      ..sort((a, b) {
+        final ad = a.dueAt;
+        final bd = b.dueAt;
+        if (ad == null && bd == null) {
+          return b.createdAt.compareTo(a.createdAt);
+        }
+        if (ad == null) return 1;
+        if (bd == null) return -1;
+        return ad.compareTo(bd);
+      });
     final recap = _todayRecap;
     final hasDayContent = _rangeSegs.isNotEmpty ||
         _notes.any((note) => _sameDay(note.createdAt.toLocal(), now));
@@ -3198,6 +3211,15 @@ class _HomePageState extends State<HomePage> {
     final meetingById = {for (final m in _meetings) m.id: m};
     final searching = _search.text.trim().isNotEmpty;
     final showMeetings = _libTab == 0;
+    final filteredNotes = _notes.where((n) {
+      if (_notesFilter == 1) {
+        return n.isThought || n.isMoment;
+      }
+      if (_notesFilter == 2) {
+        return n.isTodo;
+      }
+      return true;
+    }).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -3241,6 +3263,27 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
+        if (!showMeetings) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 34,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 28),
+              children: [
+                for (final entry in [
+                  (0, 'All'),
+                  (1, 'Thoughts'),
+                  (2, 'To do'),
+                ])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _notesFilterChip(entry.$1, entry.$2),
+                  ),
+              ],
+            ),
+          ),
+        ],
         Expanded(
           child: showMeetings
               ? _meetings.isEmpty
@@ -3256,21 +3299,48 @@ class _HomePageState extends State<HomePage> {
                         for (final m in _meetings) _meetingRow(m),
                       ],
                     )
-              : _notes.isEmpty
+              : filteredNotes.isEmpty
                   ? _libraryEmpty(
                       searching,
                       searching
                           ? 'Try different words, or another day.'
-                          : 'Spoken notes land here. Check one off when it is done.',
+                          : _notesFilter == 2
+                              ? 'Spoken reminders and to-dos land here.'
+                              : 'Ideas and reminders you speak land here.',
                     )
                   : ListView(
                       padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
                       children: [
-                        for (final n in _notes) _noteRow(n, meetingById),
+                        for (final n in filteredNotes) _noteRow(n, meetingById),
                       ],
                     ),
         ),
       ],
+    );
+  }
+
+  Widget _notesFilterChip(int value, String label) {
+    final on = _notesFilter == value;
+    return GestureDetector(
+      onTap: () => setState(() => _notesFilter = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: on ? AppColors.ink : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: on ? AppColors.ink : AppColors.lineStrong),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontFamily: AppFonts.sans,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
+            color: on ? AppColors.paper : AppColors.muted,
+          ),
+        ),
+      ),
     );
   }
 
@@ -3485,6 +3555,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _noteRow(SpokenNote n, Map<String, MeetingRecord> meetingById) {
+    final showCheck = n.isTodo && !n.isMoment;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -3493,7 +3564,7 @@ class _HomePageState extends State<HomePage> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (!n.isMoment)
+              if (showCheck)
                 Padding(
                   padding: const EdgeInsets.only(top: 1, right: 6),
                   child: SizedBox(
@@ -3509,7 +3580,9 @@ class _HomePageState extends State<HomePage> {
                       },
                     ),
                   ),
-                ),
+                )
+              else
+                const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3519,8 +3592,12 @@ class _HomePageState extends State<HomePage> {
                       style: AppText.body.copyWith(
                         fontSize: 14,
                         height: 1.45,
-                        decoration: n.done ? TextDecoration.lineThrough : null,
-                        color: n.done ? AppColors.faint : AppColors.ink,
+                        decoration: showCheck && n.done
+                            ? TextDecoration.lineThrough
+                            : null,
+                        color: showCheck && n.done
+                            ? AppColors.faint
+                            : AppColors.ink,
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -3534,17 +3611,57 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
               ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon:
-                    const Icon(LucideIcons.x, size: 14, color: AppColors.faint),
-                tooltip: 'Delete note',
-                onPressed: () async {
-                  await _store.deleteNote(n.id);
-                  await NoteReminders.syncAll(_store);
-                  await _reload();
-                },
-              ),
+              if (!n.isMoment)
+                PopupMenuButton<String>(
+                  icon: const Icon(
+                    LucideIcons.ellipsis,
+                    size: 16,
+                    color: AppColors.faint,
+                  ),
+                  tooltip: 'Note actions',
+                  onSelected: (value) async {
+                    if (value == 'delete') {
+                      await _store.deleteNote(n.id);
+                    } else if (value == 'todo') {
+                      await _store.updateNoteKind(n.id, NoteKind.todo);
+                    } else if (value == 'thought') {
+                      await _store.updateNoteKind(n.id, NoteKind.thought);
+                    }
+                    await NoteReminders.syncAll(_store);
+                    await _reload();
+                  },
+                  itemBuilder: (context) => [
+                    if (n.isThought)
+                      const PopupMenuItem(
+                        value: 'todo',
+                        child: Text('Mark as to do'),
+                      ),
+                    if (n.isTodo)
+                      const PopupMenuItem(
+                        value: 'thought',
+                        child: Text('Mark as thought'),
+                      ),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Delete'),
+                    ),
+                  ],
+                )
+              else
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(
+                    LucideIcons.x,
+                    size: 14,
+                    color: AppColors.faint,
+                  ),
+                  tooltip: 'Delete note',
+                  onPressed: () async {
+                    await _store.deleteNote(n.id);
+                    await NoteReminders.syncAll(_store);
+                    await _reload();
+                  },
+                ),
             ],
           ),
         ),
@@ -3817,14 +3934,18 @@ class _HomePageState extends State<HomePage> {
   String _noteSubtitle(SpokenNote n, Map<String, MeetingRecord> meetings) {
     final when = DateFormat.jm().format(n.createdAt.toLocal());
     final bits = <String>[when];
-    if (n.done) {
+    if (n.isMoment) {
+      bits.add('moment');
+    } else if (n.isThought) {
+      bits.add('thought');
+    } else if (n.done) {
       bits.add('done');
     } else if (n.dueAt != null) {
       final due = n.dueAt!.toLocal();
       final dueLabel = DateFormat.jm().format(due);
       bits.add(
           due.isAfter(DateTime.now()) ? 'due $dueLabel' : 'overdue $dueLabel');
-    } else if (!n.isMoment) {
+    } else {
       bits.add('morning reminder');
     }
     final m = n.meetingId == null ? null : meetings[n.meetingId!];

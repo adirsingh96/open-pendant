@@ -366,6 +366,7 @@ class SpokenNote {
     this.meetingId,
     this.dueAt,
     this.done = false,
+    this.kind = 'thought',
   });
 
   final String id;
@@ -376,12 +377,20 @@ class SpokenNote {
   final DateTime? dueAt;
   final bool done;
 
+  /// `thought` (idea / observation) or `todo` (action / reminder).
+  final String kind;
+
   bool get isMoment => text.trim().toLowerCase() == 'marked moment';
+
+  bool get isTodo => kind == 'todo';
+
+  bool get isThought => !isTodo;
 
   SpokenNote copyWith({
     DateTime? dueAt,
     bool clearDueAt = false,
     bool? done,
+    String? kind,
   }) {
     return SpokenNote(
       id: id,
@@ -391,6 +400,7 @@ class SpokenNote {
       meetingId: meetingId,
       dueAt: clearDueAt ? null : (dueAt ?? this.dueAt),
       done: done ?? this.done,
+      kind: kind ?? this.kind,
     );
   }
 }

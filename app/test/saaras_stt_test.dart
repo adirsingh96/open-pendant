@@ -15,6 +15,69 @@ void main() {
     expect(friendlySaarasError(error), contains('saved key'));
   });
 
+  test('friendlySaarasError explains duration limit', () {
+    final error = Exception(
+      'saaras:v4 REST 400: Audio duration exceeds the maximum limit of 30 seconds',
+    );
+    expect(isSaarasDurationError(error), isTrue);
+    expect(friendlySaarasError(error), contains('too long'));
+  });
+
+  test('saarasRestPcmRanges splits long PCM under 28s', () {
+    final sixty = 60 * 16000 * 2;
+    final ranges = saarasRestPcmRanges(sixty);
+    expect(ranges, hasLength(3));
+    expect(ranges.first.$1, 0);
+    expect(ranges.last.$2, sixty);
+    for (final (start, end) in ranges) {
+      final secs = (end - start) / (16000 * 2);
+      expect(secs, lessThanOrEqualTo(SaarasStt.maxRestSeconds + 1e-9));
+      expect((end - start) % 2, 0);
+    }
+  });
+
+  test('parseSaarasTranscript applies concatOffsetS', () {
+    final r = parseSaarasTranscript(
+      json: {
+        'transcript': 'Second half',
+        'timestamps': {
+          'words': ['Second'],
+          'start_time_seconds': [0.5],
+          'end_time_seconds': [1.0],
+        },
+      },
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      concatOffsetS: 28,
+      billedSeconds: 2,
+    );
+    expect(r.segments.single.startS, closeTo(28.5, 1e-9));
+    expect(r.segments.single.endS, closeTo(29.0, 1e-9));
+  });
+
+  test('mergeSaarasChunkResults stitches text in order', () {
+    final a = parseSaarasTranscript(
+      json: {'transcript': 'One'},
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      billedSeconds: 1,
+    );
+    final b = parseSaarasTranscript(
+      json: {'transcript': 'Two'},
+      model: 'saaras:v4',
+      startedAt: DateTime.utc(2026, 8, 21, 10),
+      concatOffsetS: 28,
+      billedSeconds: 1,
+    );
+    final merged = mergeSaarasChunkResults(
+      [a, b],
+      model: 'saaras:v4',
+      billedSeconds: 2,
+    );
+    expect(merged.text, 'One Two');
+    expect(merged.segments, hasLength(2));
+  });
+
   test('parseSaarasTranscript uses diarized entries', () {
     final r = parseSaarasTranscript(
       json: {

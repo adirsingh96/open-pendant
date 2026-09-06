@@ -9,12 +9,56 @@ Record only with an obvious LED and an explicit host subscribe (GATT notify on =
 | Part | Notes |
 |------|--------|
 | Seeed XIAO nRF52840 Sense | nRF52840 + onboard PDM mic + LSM6DS3TR-C IMU |
-| WLY602030 1S LiPo | 3.7 V nominal, 300 mAh, 6 × 20 × 30 mm (32.5 mm with PCM). Open-wire leads to the XIAO **BAT+/BAT−** pads. USB-C charges via the onboard BQ25101. |
+| microSD SPI/SDIO module | 8-pin breakout; VCC = **3V3 only** (never 5V) |
+| Ø6 tactile button | 2-pin NO; COM → GND, NO → D1 |
+| 22 µF capacitor | Across SD **3V3** and **GND** (16 V ceramic preferred) |
+| Perfboard strip | ~8 × 18 holes; XIAO + SD on the front, LiPo on the back |
+| WLY602030 1S LiPo | 3.7 V nominal, 300 mAh, 6 × 20 × 30 mm. Open-wire to **BAT+/BAT−**. USB-C charges via BQ25101. |
 | USB-C cable | Dev and UF2 flash |
+
+Assembly guide (photos, 3D viewer, printable case): [`docs/pendant_assembly.html`](docs/pendant_assembly.html).
+
+### Wiring (USB at the bottom)
+
+Pin map with the component face toward you:
+
+```text
+  XIAO                              microSD (SPI)
+  ----                              -------------
+  D9  (SCK)  ---------------------> CLK
+  D8  (MOSI) ---------------------> CMD
+  D7  (MISO) ---------------------> D0
+  D6  (CS)   ---------------------> D3
+  3V3 ----------------------------> 3V3
+  GND ----------------------------> GND
+                                    D1, D2  (leave open)
+
+  Button NO  ---------------------> D1
+  Button COM ---------------------> GND
+
+  22 µF  across SD 3V3 ↔ SD GND
+
+  LiPo red  --> BAT+     (through the BAT window, last)
+  LiPo black -> BAT−
+```
+
+```text
+Left (USB bottom)     Right (USB bottom)
+─────────────────     ──────────────────
+5V   (empty)          D0
+GND                   D1  button NO
+3V3 ──► SD 3V3        D2
+D10                   D3
+D9  ──► SD CLK        D4  (IMU SDA — do not use)
+D8  ──► SD CMD        D5  (IMU SCL — do not use)
+D7  ──► SD D0         D6 ──► SD D3 (CS)
+```
+
+Firmware remaps SPI2 onto **D9 / D8 / D7** (not the board silk SPI defaults D8 / D10 / D9) and disables UART0 so it cannot steal **D6 / D7**. After soldering, flash over USB (no cell required) and run **Settings → Developer → Run SD test** with a FAT32 card.
 
 ## What you get
 
-- **Firmware** (Zephyr / nRF Connect SDK 3.4, Zephyr 4.4): BLE GATT PCM + status, IMU still-sleep (mic off when the board is still, wake on motion), battery voltage / SoC estimate.
+- **Firmware** (Zephyr / nRF Connect SDK 3.4, Zephyr 4.4): BLE GATT PCM + status, IMU still-sleep (mic off when the board is still, wake on motion), battery voltage / SoC estimate, microSD FAT R/W self-test.
 - **Flutter app** in [`app/`](app/): meetings and hold-to-talk notes over BLE, local VAD, **Saaras v4** or on-device **Qwen3-ASR**, optional **OpenAI diarization**, reminders, daily briefings and recaps, persistent follow-ups, Memories search, and local SQLite. Double-click the pendant to ring the connected phone.
 - **Laptop tools** in [`tools/`](tools/): BLE capture to WAV, OpenAI or local Whisper.
 
@@ -41,6 +85,8 @@ python3 -m serial.tools.miniterm /dev/cu.usbmodem1101 115200
 ```
 
 BLE advertises as **OpenPendant**. Disconnect nRF Connect before the app or laptop capture (one connection).
+
+Control UUID `70301104-…`: write `1` / `0` for find-pendant LED flash; write `2` to run the SD mount / write / read test (result in status bytes 8–9).
 
 ## Flutter app
 
@@ -86,7 +132,7 @@ python3 tools/transcribe.py capture.wav --backend local
 
 ## Battery
 
-Solder the WLY602030 **red** lead to **BAT+** and **black** to **BAT−** (polarity matters; open wire, no JST). USB-C charges the cell through the XIAO BQ25101.
+Solder the WLY602030 **red** lead to **BAT+** and **black** to **BAT−** (polarity matters; open wire, no JST). USB-C charges the cell through the XIAO BQ25101. Connect the cell **last**, after the SD / button joints meter clean on USB.
 
 The cell has no fuel-gauge IC. Firmware measures pack voltage (P0.31, 1 MΩ / 510 kΩ divider) and the app maps that to a **rough SoC only when USB is unplugged**. On USB the BQ25101 rail reads ~4.1 V even with no cell, so the UI shows **USB** instead of a fake percent. Treat ~20% as “charge soon.” Keep P0.14 low whenever a cell is attached (firmware hog does this) so P0.31 stays within 3.6 V.
 

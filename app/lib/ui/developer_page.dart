@@ -74,10 +74,12 @@ class DeveloperPage extends StatelessWidget {
     super.key,
     required this.live,
     required this.rangeBar,
+    this.onSdTest,
   });
 
   final DeveloperLive live;
   final Widget rangeBar;
+  final Future<bool> Function()? onSdTest;
 
   String _batteryLine(PendantStatus s) {
     final mv = s.batteryMv;
@@ -109,6 +111,7 @@ class DeveloperPage extends StatelessWidget {
                     ? 'SLEEP'
                     : 'AWAKE';
         final clock = DateFormat.Hms();
+        final sdBusy = s?.sdBusy == true;
         return PageScaffold(
           title: 'Developer',
           body: ListView(
@@ -147,11 +150,11 @@ class DeveloperPage extends StatelessWidget {
                 ),
               ],
               const SizedBox(height: 16),
-              Text('BUTTON (D10)', style: AppText.micro),
+              Text('BUTTON (D1)', style: AppText.micro),
               const SizedBox(height: 6),
               const Text(
                 'Click starts or ends a meeting (red). Hold ~0.7s for a note (blue). '
-                'COM to GND, NO to pin 10. Serial: BTN single / long-down / long-up.',
+                'COM to GND, NO to D1. Serial: BTN single / long-down / long-up.',
               ),
               const SizedBox(height: 8),
               if (s != null)
@@ -165,6 +168,46 @@ class DeveloperPage extends StatelessWidget {
               else
                 for (final line in live.buttonLog.take(12))
                   Text(line, style: Theme.of(context).textTheme.bodyMedium),
+              const SizedBox(height: 16),
+              Text('SD CARD', style: AppText.micro),
+              const SizedBox(height: 6),
+              const Text(
+                'SPI: CLK→D9, CMD→D8, D0→D7, CS→D6. Card must be FAT32. '
+                'Tap Run to mount, write /SD:/opentest.txt, and read it back. '
+                'USB power is enough — leave the LiPo off for this check.',
+              ),
+              const SizedBox(height: 8),
+              Text(
+                s == null
+                    ? 'Result: connect the pendant first'
+                    : 'Result: ${s.sdLabel}',
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton(
+                  onPressed: (!live.connected ||
+                          onSdTest == null ||
+                          sdBusy)
+                      ? null
+                      : () async {
+                          final ok = await onSdTest!();
+                          if (!context.mounted) {
+                            return;
+                          }
+                          if (!ok) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Could not send SD test (control char missing?)',
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                  child: Text(sdBusy ? 'Testing…' : 'Run SD test'),
+                ),
+              ),
               const SizedBox(height: 8),
               const Text(
                 'Idle: slow green blink. Meeting: solid red. Note hold: blue '

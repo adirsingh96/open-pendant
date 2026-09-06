@@ -1,5 +1,6 @@
 import '../db/day_recap.dart';
 import '../db/models.dart';
+import 'note_kind.dart';
 
 String recapTaskId({
   required String scope,
@@ -32,6 +33,7 @@ List<SpokenNote> notesFromRecap({
         createdAt: at,
         text: followUp.action,
         meetingId: meetingId,
+        kind: NoteKind.todo,
       ),
     for (final loop in recap.openLoops)
       SpokenNote(
@@ -39,6 +41,7 @@ List<SpokenNote> notesFromRecap({
         createdAt: at,
         text: loop,
         meetingId: meetingId,
+        kind: NoteKind.todo,
       ),
   ];
 }

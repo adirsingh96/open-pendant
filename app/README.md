@@ -25,7 +25,7 @@ Disconnect nRF Connect first (the pendant allows one BLE connection). Optional *
 
 **Find pendant:** from the connected sheet or Settings → More. Walk and watch the ring — a stronger BLE signal means closer. It cannot point a compass direction. Current firmware also flashes the board LEDs while you search.
 
-**Note reminders:** “remind me to call mom at 10 AM” notifies 15 minutes before (or 5 minutes / at due if you are already close). Notes with no clock are included in an 8 AM digest until you check them off on the Notes tab. iOS will ask for notification permission the first time a reminder is scheduled.
+**Note reminders:** “remind me to call mom at 10 AM” notifies 15 minutes before (or 5 minutes / at due if you are already close). Reminder-shaped speech is saved as a **to do**. Everything else is a **thought** (idea / observation) with no checkbox. Library → Notes is a chronological feed with All / Thoughts / To do filters; convert between kinds from the row menu. Untimed to-dos are included in an 8 AM digest until you check them off. iOS will ask for notification permission the first time a reminder is scheduled.
 
 **Daily review:** Home’s briefing surfaces the next pending note and unfinished work. **Close today** sends that day’s stored transcript text and notes to OpenAI, saves a structured recap, and promotes follow-ups/open loops into checkable notes. The recap feeds Memories and optionally Mem0. Open the day review and tap refresh to replace the recap after more recording; refreshing does not create recap copies, but it does use OpenAI again.
 

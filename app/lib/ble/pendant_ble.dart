@@ -24,6 +24,8 @@ class PendantStatus {
     this.buttonEvent = 0,
     this.buttonSeq = 0,
     this.noteHeld = false,
+    this.sdResult = 0,
+    this.sdDetail = 0,
   });
 
   final bool imuSleep;
@@ -38,6 +40,8 @@ class PendantStatus {
   final int buttonEvent;
   final int buttonSeq;
   final bool noteHeld;
+  final int sdResult;
+  final int sdDetail;
 
   String get buttonLabel {
     switch (buttonEvent) {
@@ -53,6 +57,30 @@ class PendantStatus {
         return 'none';
     }
   }
+
+  String get sdLabel {
+    switch (sdResult) {
+      case 1:
+        return 'testing…';
+      case 2:
+        return 'pass (wrote + read /SD:/opentest.txt)';
+      case 3:
+        return 'fail: card init (detail $sdDetail)';
+      case 4:
+        return 'fail: FAT mount (format FAT32? detail $sdDetail)';
+      case 5:
+        return 'fail: write (detail $sdDetail)';
+      case 6:
+        return 'fail: read (detail $sdDetail)';
+      case 7:
+        return 'fail: data mismatch';
+      default:
+        return 'not run yet';
+    }
+  }
+
+  bool get sdBusy => sdResult == 1;
+  bool get sdPass => sdResult == 2;
 
   /// Resting 1S LiPo estimate. Invalid on USB — the charger rail is ~4.1 V
   /// even with no cell attached.
@@ -118,6 +146,8 @@ class PendantStatus {
       buttonEvent: data.length >= 8 ? data[6] : 0,
       buttonSeq: data.length >= 8 ? data[7] : 0,
       noteHeld: (flags & 32) != 0,
+      sdResult: data.length >= 10 ? data[8] : 0,
+      sdDetail: data.length >= 10 ? data[9] : 0,
     );
   }
 }
@@ -427,12 +457,20 @@ class PendantBle {
 
   /// Flash the board LEDs (needs firmware with the control characteristic).
   Future<bool> setLocate(bool on) async {
+    return _writeControl([on ? 1 : 0]);
+  }
+
+  /// Run the pendant SD card mount / write / read self-test.
+  Future<bool> runSdTest() async {
+    return _writeControl([2]);
+  }
+
+  Future<bool> _writeControl(List<int> payload) async {
     final c = _control;
     if (c == null) {
       return false;
     }
     try {
-      final payload = [on ? 1 : 0];
       if (c.properties.writeWithoutResponse) {
         await c.write(payload, withoutResponse: true);
       } else {

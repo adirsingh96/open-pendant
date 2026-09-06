@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../notes/note_kind.dart';
 import '../notes/reminder_parse.dart';
 import 'day_recap.dart';
 import 'meeting.dart';
@@ -23,7 +24,7 @@ class ClipStore {
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 11,
+      version: 12,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -134,6 +135,9 @@ CREATE TABLE clips (
         }
         if (oldVersion < 11) {
           await _upgradeNoteReminders(db);
+        }
+        if (oldVersion < 12) {
+          await _upgradeNoteKind(db);
         }
       },
     );
@@ -429,6 +433,7 @@ CREATE TABLE memory_chats (
     await _createNotesTable(db);
     await _upgradeNotesMeetingId(db);
     await _upgradeNoteReminders(db);
+    await _upgradeNoteKind(db);
   }
 
   Future<void> _ensureMeetingsSchema(DatabaseExecutor db) async {
@@ -487,7 +492,8 @@ CREATE TABLE IF NOT EXISTS notes (
   clip_id TEXT,
   meeting_id TEXT,
   done INTEGER NOT NULL DEFAULT 0,
-  due_at TEXT
+  due_at TEXT,
+  kind TEXT NOT NULL DEFAULT 'thought'
 )''');
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at)',
@@ -511,6 +517,35 @@ CREATE TABLE IF NOT EXISTS notes (
     }
   }
 
+  Future<void> _upgradeNoteKind(DatabaseExecutor db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(notes)');
+    final names = {for (final c in cols) c['name'] as String};
+    if (!names.contains('kind')) {
+      try {
+        await db.execute(
+          "ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'thought'",
+        );
+      } catch (_) {}
+    }
+    final rows = await db.query('notes');
+    for (final r in rows) {
+      final id = r['id'] as String? ?? '';
+      final text = r['text'] as String? ?? '';
+      final due = DateTime.tryParse(r['due_at'] as String? ?? '');
+      final kind = classifyNoteKind(text, id: id, dueAt: due);
+      final existing = (r['kind'] as String? ?? '').trim();
+      if (existing == kind) {
+        continue;
+      }
+      await db.update(
+        'notes',
+        {'kind': kind},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    }
+  }
+
   bool _sqlBool(Object? v) {
     if (v is bool) {
       return v;
@@ -522,27 +557,47 @@ CREATE TABLE IF NOT EXISTS notes (
   }
 
   SpokenNote _noteFromRow(Map<String, Object?> r) {
+    final id = r['id'] as String;
+    final text = r['text'] as String? ?? '';
+    final dueAt = DateTime.tryParse(r['due_at'] as String? ?? '');
+    final rawKind = (r['kind'] as String? ?? '').trim();
+    final kind = rawKind.isEmpty
+        ? classifyNoteKind(text, id: id, dueAt: dueAt)
+        : rawKind;
     return SpokenNote(
-      id: r['id'] as String,
+      id: id,
       createdAt: DateTime.tryParse(r['created_at'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      text: r['text'] as String? ?? '',
+      text: text,
       clipId: r['clip_id'] as String?,
       meetingId: r['meeting_id'] as String?,
       done: _sqlBool(r['done']),
-      dueAt: DateTime.tryParse(r['due_at'] as String? ?? ''),
+      dueAt: dueAt,
+      kind: kind,
     );
   }
 
-  Future<SpokenNote> insertNote(SpokenNote note) async {
-    // Due time is parsed for notifications only. Spoken text is stored as-is.
+  SpokenNote _prepareNote(SpokenNote note) {
     final due = note.isMoment
         ? null
         : note.dueAt ??
             parseNoteReminder(note.text, now: note.createdAt.toLocal()).dueAt;
-    final stored = note.copyWith(dueAt: due, clearDueAt: due == null);
-    final db = await _open();
-    await db.insert('notes', {
+    final withDue = note.copyWith(dueAt: due, clearDueAt: due == null);
+    if (note.isMoment) {
+      return withDue.copyWith(kind: NoteKind.thought);
+    }
+    final classified = classifyNoteKind(
+      withDue.text,
+      now: withDue.createdAt.toLocal(),
+      id: withDue.id,
+      dueAt: withDue.dueAt,
+    );
+    final kind = note.kind == NoteKind.todo ? NoteKind.todo : classified;
+    return withDue.copyWith(kind: kind);
+  }
+
+  Map<String, Object?> _noteRow(SpokenNote stored) {
+    return {
       'id': stored.id,
       'created_at': stored.createdAt.toUtc().toIso8601String(),
       'text': stored.text,
@@ -550,28 +605,24 @@ CREATE TABLE IF NOT EXISTS notes (
       'meeting_id': stored.meetingId,
       'done': stored.done ? 1 : 0,
       'due_at': stored.dueAt?.toUtc().toIso8601String(),
-    });
+      'kind': stored.kind,
+    };
+  }
+
+  Future<SpokenNote> insertNote(SpokenNote note) async {
+    // Due time is parsed for notifications only. Spoken text is stored as-is.
+    final stored = _prepareNote(note);
+    final db = await _open();
+    await db.insert('notes', _noteRow(stored));
     return stored;
   }
 
   Future<SpokenNote> insertNoteIfAbsent(SpokenNote note) async {
-    final due = note.isMoment
-        ? null
-        : note.dueAt ??
-            parseNoteReminder(note.text, now: note.createdAt.toLocal()).dueAt;
-    final stored = note.copyWith(dueAt: due, clearDueAt: due == null);
+    final stored = _prepareNote(note);
     final db = await _open();
     await db.insert(
       'notes',
-      {
-        'id': stored.id,
-        'created_at': stored.createdAt.toUtc().toIso8601String(),
-        'text': stored.text,
-        'clip_id': stored.clipId,
-        'meeting_id': stored.meetingId,
-        'done': stored.done ? 1 : 0,
-        'due_at': stored.dueAt?.toUtc().toIso8601String(),
-      },
+      _noteRow(stored),
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
     return stored;
@@ -629,6 +680,16 @@ CREATE TABLE IF NOT EXISTS notes (
     );
   }
 
+  Future<void> updateNoteKind(String id, String kind) async {
+    final db = await _open();
+    await db.update(
+      'notes',
+      {'kind': kind},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<void> updateNoteDueAt(String id, DateTime? dueAt) async {
     final db = await _open();
     await db.update(
@@ -643,7 +704,7 @@ CREATE TABLE IF NOT EXISTS notes (
     final db = await _open();
     final rows = await db.query(
       'notes',
-      where: 'done = 0',
+      where: "done = 0 AND kind = 'todo'",
       orderBy: 'created_at DESC',
     );
     return [
