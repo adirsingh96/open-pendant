@@ -31,6 +31,28 @@ class MeetingRecord {
         (c) => c.status == 'transcribing' || c.status == 'refining',
       );
 
+  bool get sttFailed => clips.any((c) => c.status == 'error');
+
+  /// Wall-clock length while live; otherwise endedAt, else last clip end.
+  DateTime inferredEndedAt(DateTime now) {
+    if (endedAt != null) {
+      return endedAt!;
+    }
+    if (clips.isEmpty) {
+      return now;
+    }
+    var end = startedAt;
+    for (final c in clips) {
+      final e = c.startedAt.add(
+        Duration(milliseconds: (c.durationS * 1000).round()),
+      );
+      if (e.isAfter(end)) {
+        end = e;
+      }
+    }
+    return end;
+  }
+
   Duration durationAt(DateTime now) {
     final end = endedAt ?? now;
     final d = end.difference(startedAt);

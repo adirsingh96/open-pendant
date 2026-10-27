@@ -54,7 +54,8 @@ class _MeetingDetailPageState extends State<MeetingDetailPage> {
   Timer? _sttPoll;
 
   bool get _awaitingTranscript =>
-      _meeting.transcribing || (_meeting.live && !_meeting.hasSpokenText);
+      _meeting.transcribing ||
+      (_meeting.live && !_meeting.hasSpokenText && !_meeting.sttFailed);
 
   @override
   void initState() {

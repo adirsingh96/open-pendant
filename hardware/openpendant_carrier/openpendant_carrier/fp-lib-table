@@ -1,0 +1,5 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Seeed_XIAO")(type "KiCad")(uri "${KIPRJMOD}/lib/Seeed_XIAO.pretty")(options "")(descr "Seeed Studio XIAO SMD footprints"))
+  (lib (name "Battery")(type "KiCad")(uri "${KIPRJMOD}/lib/Battery.pretty")(options "")(descr "Hand-soldered cell pads"))
+)

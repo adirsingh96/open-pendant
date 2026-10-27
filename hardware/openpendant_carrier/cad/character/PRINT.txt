@@ -1,0 +1,87 @@
+Orbit O case. The card stays inside the shells. Open the
+two halves to take it out. There is no slot in the outer wall.
+
+Printer
+  0.4 mm nozzle, 0.2 mm layers.
+  PETG. PLA is only for a fit check.
+  Front: skirt on the bed. No supports.
+  Back: chest face on the bed, cavity up. The chain bail is at the
+  top edge and its underside is flush with the chest face, so it
+  sits on the bed. No support.
+  Button hat: wide disc on the bed, head pointing up.
+
+Chain
+  One bail on the back, centered at the top. The hole is 5 mm and
+  runs left to right. About 1.6 mm of plastic is around it. Use a
+  chain or cord a little under 5 mm.
+  The bail stops below the front skirt, so the lid still snaps on.
+
+Snap
+  The skirt is the spring. Each long side has two catches, 8 mm
+  long, with a ramp so the lid slides on and a flat top that holds
+  it. Pry at the notch in the middle of each side. The old teeth
+  are gone.
+
+Card
+  The socket and the card sit in the cavity. Nothing is cut through
+  the top wall. To change the card, unsnap the front shell.
+
+Board
+  The real board is the mirror of the KiCad file. USB-C down, the
+  button is on the left. The case matches that.
+  The USB-C metal face is the end of the case. The opening is only
+  the shape of the connector, so a cable plugs straight in. The two
+  corners on that end are round, the same as the top. Reprint
+  the front and the back.
+  The cell pocket is 1.5 mm deeper than the cell, so the red and
+  black leads can lie on the cell and the board still sits down.
+  The case is 1.5 mm thicker because of that.
+  The board drops into the back shell. Stops at the USB end and the
+  top leave 0.15 mm. The stops on the long sides leave 0.5 mm, so
+  the board does not shear them off on the way in. The lid keeps
+  the board down. Nothing is glued.
+
+The front
+  The logo is a tall O drawn as an orbit, centered on the lid. It is
+  an inlay, not a relief: pockets 0.6 mm deep, filled flush, so the
+  face is flat and nothing catches on clothes or a thumb. The ring
+  is 3.5 mm wide. The O is the only art on the face.
+  The pocket floor leaves 0.6 mm of lid under the art. The only holes
+  through that wall are the ones that were already there: button,
+  mic, LED.
+  The button hat is the planet on the upper right of the ring. Its
+  head is 5.2 mm across, sits in a 6.6 mm hole so a ring of black
+  shell shows around it, and stands 1 mm proud of the face. That is
+  the one bump kept: it is how a finger finds the button.
+
+Colors, in Bambu Studio (P1S + AMS)
+  The front is ONE print. The inlay is not a piece you print
+  separately and stick in: it is the white part of the same model.
+  In each of the top three layers the printer lays black around
+  the O and white inside it, and the AMS swaps between them.
+
+  1. Load character_front.3mf. Remove any older copy first.
+  2. Set the project filaments to the spools in your AMS:
+     filament 1 black, filament 2 white.
+  3. Click the "Objects" tab at the top of the left panel, next
+     to "Global". Expand the model. Two parts: Front_Shell and
+     Orbit_Inlay. If you only see one part, right-click the model
+     and choose Split, then To Parts.
+  4. Front_Shell gets filament 1. Click Orbit_Inlay, right-click,
+     Change Filament, filament 2. The O turns white on screen.
+     Before this step you cannot see it: the inlay is flush and
+     the same color as the shell.
+  5. Select the model and click Arrange so it sits on the plate.
+     Check from the top view: the flat face with the O points up,
+     the open skirt points down. Do not flip it.
+  6. The floating cantilever warning is the inside ceiling of
+     the lid. It bridges the hollow shell and is hidden inside
+     the closed case. No supports. Ignore the warning.
+  7. Prime tower on. Slice, then check the Preview from the top:
+     the white O appears in the last three layers.
+  character_front.stl is the same model without part names.
+  Button hat: all white, its own print. It is the planet, and it
+  drops into the shell from inside. Nothing is glued.
+  Back shell: all black, its own print.
+  In Fusion the same split is appearances: black shells, white
+  inlay body, white hat.

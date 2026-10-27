@@ -32,11 +32,9 @@ import '../stt/cursor_command.dart';
 import '../stt/cursor_prefs.dart';
 import '../macos/cursor_composer.dart';
 import '../stt/openai_refine.dart';
-import '../stt/openai_stt.dart';
 import '../stt/local_whisper_stt.dart';
 import '../stt/saaras_stt.dart';
 import '../stt/sarvam_key_store.dart';
-import '../stt/speaker_spans.dart';
 import '../stt/stt_prefs.dart';
 import '../stt/voice_store.dart';
 import 'clip_page.dart';
@@ -73,10 +71,10 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  // Stay under Sarvam REST's exclusive 30s cap (see SaarasStt.maxRestSeconds).
-  static const _maxChunkBytes = 28 * 16000 * 2;
+  // Sarvam was refusing ~28s clips (503) and keeping only the short tail.
+  // Cut while a person is still talking so each upload stays small.
+  static const _maxChunkBytes = 12 * 16000 * 2;
   static const _quietRotate = Duration(seconds: 8);
-  static const _cursorQuietRotate = Duration(milliseconds: 1500);
   static const _noPcmRotate = Duration(seconds: 2);
   static const _notePrerollBytes = 16000 * 2 * 7 ~/ 10;
 
@@ -84,7 +82,6 @@ class _HomePageState extends State<HomePage> {
   Timer? _armTick;
   final _ble = PendantBle();
   final _store = ClipStore();
-  final _stt = OpenAiStt();
   final _saaras = SaarasStt();
   final _whisper = LocalWhisperStt();
   final _refine = OpenAiRefine();
@@ -115,6 +112,7 @@ class _HomePageState extends State<HomePage> {
   String? _sessionId;
   int _seq = 0;
   final _sttQueue = <ClipRecord>[];
+  final _sttActive = <String>{};
   bool _sttBusy = false;
   List<MeetingRecord> _meetings = [];
   List<SpokenNote> _notes = [];
@@ -124,6 +122,9 @@ class _HomePageState extends State<HomePage> {
   DayRecap? _todayRecap;
   bool _commandNext = false;
   bool _noteHolding = false;
+
+  /// Pendant is writing a note to SD while BLE is connected; UI only.
+  bool _noteSdMirror = false;
 
   /// True when Capture on the phone started the note. Pendant status still
   /// reports `noteHeld: false`, so those packets must not end an in-app note.
@@ -148,6 +149,8 @@ class _HomePageState extends State<HomePage> {
   Future<void>? _noteBegin;
   final _buttonNoteIds = <String>{};
   final _buttonNoteMeetingIds = <String, String>{};
+  bool _sdSyncBusy = false;
+  String? _lastSdSync;
   List<DateTime> _speechDays = [];
   DateTime? _rangeFrom;
   DateTime? _rangeTo;
@@ -186,7 +189,11 @@ class _HomePageState extends State<HomePage> {
     final now = DateTime.now();
     _rangeFrom = DateTime(now.year, now.month, now.day);
     _rangeTo = DateTime(now.year, now.month, now.day, 23, 59, 59);
-    _reload();
+    _reload().then((_) {
+      if (mounted) {
+        unawaited(_resumeStuckStt());
+      }
+    });
     NoteReminders.init().then((_) {
       if (!mounted) {
         return;
@@ -201,6 +208,7 @@ class _HomePageState extends State<HomePage> {
         _syncKeepLink();
         _syncNearbyWatch();
         NoteReminders.syncAll(_store);
+        unawaited(_resumeStuckStt());
       },
       onHide: () {
         _appForeground = false;
@@ -247,12 +255,9 @@ class _HomePageState extends State<HomePage> {
     if (!_armed || _noteHolding || _usingDeviceMic) {
       return;
     }
-    if (s.imuSleep && !wasSleep) {
-      Future.microtask(() => _rotateChunk());
-    } else if (!s.imuSleep && wasSleep) {
+    if (!s.imuSleep && wasSleep) {
       _chunkStartedAt = DateTime.now().toUtc();
       _lastSpeechAt = DateTime.now();
-      _hadSpeechInChunk = false;
       _refreshArmedStatus();
     }
   }
@@ -277,10 +282,18 @@ class _HomePageState extends State<HomePage> {
     if (held && !_noteHolding) {
       _noteFromApp = false;
       _noteHolding = true;
+      _noteSdMirror = false;
       _noteBegin = _beginButtonNote();
     } else if (!held && _noteHolding && !_noteFromApp) {
       _noteHolding = false;
-      unawaited(_endButtonNote());
+      if (_noteSdMirror) {
+        _noteSdMirror = false;
+        if (mounted) {
+          setState(() {});
+        }
+      } else {
+        unawaited(_endButtonNote());
+      }
     }
   }
 
@@ -839,6 +852,8 @@ class _HomePageState extends State<HomePage> {
       totalInTok: _totalInTok,
       totalOutTok: _totalOutTok,
       segments: _rangeSegs,
+      sdSyncBusy: _sdSyncBusy,
+      lastSdSync: _lastSdSync,
       force: force,
     );
   }
@@ -891,6 +906,18 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     if (_noteHolding && !_armed) {
+      if (_noteSdMirror) {
+        _noteHolding = false;
+        _noteSdMirror = false;
+        setState(() {
+          _connected = false;
+          _dbg = null;
+          _btnSeqPrimed = false;
+          _status = 'Connection lost. Reconnecting…';
+        });
+        _syncKeepLink();
+        return;
+      }
       unawaited(_failPendantNote().whenComplete(_syncKeepLink));
       return;
     }
@@ -958,6 +985,165 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _onBleConnected() async {
+    if (!mounted) {
+      return;
+    }
+    // Defer so CCC/MTU settle and firmware can finalize open SD files.
+    Future<void>.delayed(const Duration(seconds: 3), () async {
+      if (!mounted || !_ble.isConnected || _armed || _ble.isCapturing) {
+        return;
+      }
+      await _syncOfflineSd();
+    });
+  }
+
+  /// Pull pending offline SD clips into ClipStore / STT (dedup by pendant id).
+  Future<String> _syncOfflineSd({bool manual = false}) async {
+    if (!_ble.isConnected) {
+      return 'Connect the pendant first.';
+    }
+    if (_sdSyncBusy || _ble.isCapturing) {
+      return _sdSyncBusy ? 'SD sync already running.' : 'Stop live capture first.';
+    }
+    _sdSyncBusy = true;
+    if (mounted) {
+      setState(() {
+        _lastSdSync = 'Syncing SD…';
+      });
+      _syncDev(force: true);
+    }
+    var imported = 0;
+    var skipped = 0;
+    var deleted = 0;
+    final meetingSessions = <String>{};
+    try {
+      final pending = await _ble.listPendingSd();
+      pending.sort((a, b) {
+        final s = a.session.compareTo(b.session);
+        if (s != 0) {
+          return s;
+        }
+        return a.seq.compareTo(b.seq);
+      });
+      for (final entry in pending) {
+        if (entry.size < 3200) {
+          await _ble.deleteSdClip(entry.id);
+          deleted++;
+          continue;
+        }
+        if (await _store.hasPendantClipId(entry.idHex)) {
+          await _ble.deleteSdClip(entry.id);
+          skipped++;
+          deleted++;
+          continue;
+        }
+        final pcm = await _ble.pullSdClip(entry.id, size: entry.size);
+        if (pcm.length < 3200) {
+          await _ble.deleteSdClip(entry.id);
+          deleted++;
+          continue;
+        }
+        final duration = pcm.length / 2 / 16000;
+        final id = const Uuid().v4();
+        final dir = await getApplicationDocumentsDirectory();
+        final wavPath = p.join(dir.path, 'clips', '$id.wav');
+        await Directory(p.dirname(wavPath)).create(recursive: true);
+        await File(wavPath).writeAsBytes(pcmToWav(pcm: pcm), flush: true);
+        final started = DateTime.now().toUtc().subtract(
+              Duration(milliseconds: (duration * 1000).round()),
+            );
+        if (entry.isMeeting) {
+          final session = entry.session.isEmpty ? id : entry.session;
+          if (!meetingSessions.contains(session)) {
+            meetingSessions.add(session);
+            final existing = await _store.getMeeting(session);
+            if (existing == null) {
+              await _store.startMeeting(
+                MeetingRecord(id: session, startedAt: started),
+              );
+            }
+          }
+          final clip = ClipRecord(
+            id: id,
+            startedAt: started,
+            durationS: duration,
+            fullText: '',
+            wavPath: wavPath,
+            sttModel: null,
+            status: 'transcribing',
+            sessionId: session,
+            seq: entry.seq,
+            pendantClipId: entry.idHex,
+          );
+          await _store.upsertClip(clip);
+          _enqueueStt(clip);
+        } else {
+          final clip = ClipRecord(
+            id: id,
+            startedAt: started,
+            durationS: duration,
+            fullText: '',
+            wavPath: wavPath,
+            sttModel: null,
+            status: 'transcribing',
+            sessionId: null,
+            seq: 0,
+            pendantClipId: entry.idHex,
+          );
+          _buttonNoteIds.add(id);
+          await _store.upsertClip(clip);
+          _enqueueStt(clip);
+        }
+        await _ble.deleteSdClip(entry.id);
+        imported++;
+        deleted++;
+      }
+      await _reload();
+      final pendingHint = _ble.lastStatus?.pendingSdCount ?? 0;
+      final msg = pending.isEmpty
+          ? (pendingHint > 0
+              ? 'SD sync: list empty but status reports $pendingHint pending — retry Sync SD or run SD test.'
+              : 'SD sync: nothing pending. Offline needs a FAT32 card, SPI wiring (D9/D8/D7/D6), and a click to stop the meeting before reconnect.')
+          : 'SD sync: imported $imported'
+              '${skipped > 0 ? ', skipped $skipped' : ''}'
+              '${deleted > 0 ? ', cleared $deleted on card' : ''}.';
+      if (mounted) {
+        setState(() => _lastSdSync = msg);
+        _syncDev(force: true);
+        if (manual || imported > 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(msg)),
+          );
+        }
+      }
+      return msg;
+    } catch (e) {
+      final msg = 'SD sync failed: $e';
+      if (mounted) {
+        setState(() => _lastSdSync = msg);
+        _syncDev(force: true);
+        if (manual) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(msg)),
+          );
+        }
+      }
+      return msg;
+    } finally {
+      for (final session in meetingSessions) {
+        try {
+          await _store.endMeeting(session);
+        } catch (_) {}
+      }
+      _sdSyncBusy = false;
+      if (mounted) {
+        _syncDev(force: true);
+        unawaited(_resumeStuckStt());
+      }
+    }
+  }
+
   Future<void> _adoptRestoredLink() async {
     if (!mounted || _connected || _busy || _autoConnectPaused) {
       return;
@@ -978,6 +1164,7 @@ class _HomePageState extends State<HomePage> {
           remoteId: _ble.device?.remoteId.str,
         ),
       );
+      await _onBleConnected();
     } catch (_) {}
   }
 
@@ -1064,6 +1251,7 @@ class _HomePageState extends State<HomePage> {
             remoteId: _ble.device?.remoteId.str,
           ),
         );
+        await _onBleConnected();
         return;
       } catch (_) {
         if (mounted && gen == _keepGen) {
@@ -1133,6 +1321,7 @@ class _HomePageState extends State<HomePage> {
             remoteId: _ble.device?.remoteId.str,
           ),
         );
+        await _onBleConnected();
         return;
       } catch (_) {
         if (gen != _nearbyGen || !_shouldNearbyConnect()) {
@@ -1262,9 +1451,9 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final now = DateTime.now();
-    final quiet = (CursorPrefs.enabled || NotePrefs.enabled)
-        ? _cursorQuietRotate
-        : _quietRotate;
+    // A pause between two people is often a couple of seconds. Cutting
+    // there was saving the next voice as its own clip, then dropping it.
+    final quiet = _quietRotate;
     if (_hadSpeechInChunk && now.difference(_lastSpeechAt ?? now) >= quiet) {
       Future.microtask(() => _rotateChunk());
       return;
@@ -1320,16 +1509,16 @@ class _HomePageState extends State<HomePage> {
     try {
       final started = _chunkStartedAt ?? DateTime.now().toUtc();
       final pcm = _ble.reassembler.pcmBytes();
+      if (pcm.length < 3200) {
+        _refreshArmedStatus();
+        return;
+      }
       _ble.reassembler.reset();
       _chunkStartedAt = DateTime.now().toUtc();
       _lastSpeechAt = DateTime.now();
       _lastPcmAt = DateTime.now();
       _hadSpeechInChunk = false;
       _bytes = 0;
-      if (pcm.length < 3200) {
-        _refreshArmedStatus();
-        return;
-      }
       final duration = pcm.length / 2 / 16000;
       final id = const Uuid().v4();
       final dir = await getApplicationDocumentsDirectory();
@@ -1434,8 +1623,52 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _enqueueStt(ClipRecord clip) {
+    if (_sttActive.contains(clip.id) ||
+        _sttQueue.any((c) => c.id == clip.id)) {
+      return;
+    }
     _sttQueue.add(clip);
     _pumpStt();
+  }
+
+  /// Close leftover live meetings and retry clips stuck in transcribing
+  /// after the app was killed (the STT queue is in-memory only).
+  Future<void> _resumeStuckStt() async {
+    try {
+      final open = await _store.listOpenMeetings();
+      for (final meeting in open) {
+        if (_armed && meeting.id == _sessionId) {
+          continue;
+        }
+        await _store.endMeeting(
+          meeting.id,
+          endedAt: meeting.inferredEndedAt(DateTime.now().toUtc()),
+        );
+      }
+      final stuck = await _store.listClipsWithStatus(
+        const ['transcribing', 'refining'],
+      );
+      final recentErrors = await _store.listClipsWithStatus(const ['error']);
+      final retryAfter = DateTime.now().toUtc().subtract(
+        const Duration(hours: 8),
+      );
+      for (final clip in stuck) {
+        _enqueueStt(clip);
+      }
+      for (final clip in recentErrors) {
+        final wav = clip.wavPath;
+        if (wav == null ||
+            wav.isEmpty ||
+            !File(wav).existsSync() ||
+            !clip.startedAt.isAfter(retryAfter)) {
+          continue;
+        }
+        _enqueueStt(clip);
+      }
+      if (open.isNotEmpty || stuck.isNotEmpty) {
+        await _reload();
+      }
+    } catch (_) {}
   }
 
   Future<void> _pumpStt() async {
@@ -1445,10 +1678,15 @@ class _HomePageState extends State<HomePage> {
     _sttBusy = true;
     while (_sttQueue.isNotEmpty) {
       final clip = _sttQueue.removeAt(0);
+      _sttActive.add(clip.id);
       if (mounted && _armed) {
         _refreshArmedStatus();
       }
-      await _transcribeClip(clip);
+      try {
+        await _transcribeClip(clip);
+      } finally {
+        _sttActive.remove(clip.id);
+      }
       await _reload();
     }
     _sttBusy = false;
@@ -1461,7 +1699,7 @@ class _HomePageState extends State<HomePage> {
     if (SttPrefs.engine == SttEngine.local) {
       return 'Qwen3-ASR (on-device)';
     }
-    return SttPrefs.diarize ? 'Saaras+diarize' : 'Saaras v4';
+    return 'Saaras v4';
   }
 
   List<TranscriptSegment> _sttSegs(TranscriptResult result) {
@@ -1474,47 +1712,6 @@ class _HomePageState extends State<HomePage> {
   bool _sttHasText(TranscriptResult r) {
     return r.text.trim().isNotEmpty ||
         r.segments.any((s) => s.text.trim().isNotEmpty);
-  }
-
-  Future<({TranscriptResult? result, Object? error})> _tryOpenai({
-    required File wav,
-    required String apiKey,
-    required DateTime startedAt,
-    required SpeechExtract speech,
-  }) async {
-    try {
-      return (
-        result: await _stt.transcribe(
-          wav: wav,
-          apiKey: apiKey,
-          startedAt: startedAt,
-          speech: speech,
-          preferDiarize: true,
-        ),
-        error: null,
-      );
-    } catch (e) {
-      if (isSaarasAuthError(e)) {
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-        final refreshed = await SarvamKeyStore.read(refresh: true);
-        if (refreshed.isNotEmpty) {
-          try {
-            return (
-              result: await _saaras.transcribe(
-                wav: wav,
-                apiKey: refreshed,
-                startedAt: startedAt,
-                speech: speech,
-              ),
-              error: null,
-            );
-          } catch (retryError) {
-            return (result: null, error: retryError);
-          }
-        }
-      }
-      return (result: null, error: e);
-    }
   }
 
   Future<({TranscriptResult? result, Object? error})> _trySaaras({
@@ -1542,9 +1739,15 @@ class _HomePageState extends State<HomePage> {
     await SttPrefs.load();
     final buttonNote = _buttonNoteIds.contains(clip.id);
     final wavPath = clip.wavPath;
-    final openaiKey = await ApiKeyStore.read();
     final sarvamKey = await SarvamKeyStore.read();
+    var keepWav = false;
     if (wavPath == null || !File(wavPath).existsSync()) {
+      final saved = await _store.getClip(clip.id);
+      if (saved != null &&
+          (saved.status == 'ok' || saved.status == 'note') &&
+          (saved.fullText.trim().isNotEmpty || saved.segments.isNotEmpty)) {
+        return;
+      }
       _buttonNoteIds.remove(clip.id);
       await _store.upsertClip(clip.copyWith(status: 'error'));
       return;
@@ -1555,6 +1758,7 @@ class _HomePageState extends State<HomePage> {
         _buttonNoteIds.remove(clip.id);
         await _store.upsertClip(clip.copyWith(status: 'error'));
         _toastSttFailed('No Sarvam API key. Add it in Settings.');
+        keepWav = true;
         return;
       }
 
@@ -1563,14 +1767,15 @@ class _HomePageState extends State<HomePage> {
           full.length > 44 && String.fromCharCodes(full.sublist(0, 4)) == 'RIFF'
               ? full.sublist(44)
               : full;
+      // The wearer is loud on a chest mic. Someone across the table is
+      // not, and the note floor was marking their clip as silence.
       final gated = extractSpeech(
         pcm,
         energyFloor:
             buttonNote ? VadGate.energyFloor : VadGate.meetingEnergyFloor,
-        minSpeechS: buttonNote ? 0.12 : VadGate.meetingMinSpeechS,
+        minSpeechS: 0.12,
       );
-      if (gated.speechDurationS <
-          (buttonNote ? 0.12 : VadGate.meetingMinSpeechS)) {
+      if (gated.speechDurationS < 0.12) {
         if (buttonNote) {
           _buttonNoteIds.remove(clip.id);
           await _store.upsertClip(
@@ -1611,9 +1816,7 @@ class _HomePageState extends State<HomePage> {
       final speechPath = p.join(p.dirname(wavPath), '${clip.id}_speech.wav');
       await File(speechPath).writeAsBytes(pcmToWav(pcm: pcm), flush: true);
       final wav = File(speechPath);
-      TranscriptResult? openai;
       TranscriptResult? words;
-      Object? openaiErr;
       Object? wordsErr;
       if (SttPrefs.engine == SttEngine.local) {
         try {
@@ -1629,59 +1832,37 @@ class _HomePageState extends State<HomePage> {
           wordsErr = e;
         }
       } else {
-        final wantDiarize =
-            SttPrefs.diarize && !buttonNote && openaiKey.isNotEmpty;
         final saarasF = _trySaaras(
           wav: wav,
           apiKey: sarvamKey,
           startedAt: clip.startedAt,
           speech: speech,
         );
-        final openaiF = wantDiarize
-            ? _tryOpenai(
-                wav: wav,
-                apiKey: openaiKey,
-                startedAt: clip.startedAt,
-                speech: speech,
-              )
-            : null;
         final s = await saarasF;
         words = s.result;
         wordsErr = s.error;
-        if (openaiF != null) {
-          final o = await openaiF;
-          openai = o.result;
-          openaiErr = o.error;
-          final openaiNamed = openai != null &&
-              openai.segments.any((x) => (x.speaker ?? '').trim().isNotEmpty);
-          if (words != null && openaiNamed) {
-            words = overlayDiarization(words: words, diarize: openai);
-          }
-        }
       }
 
-      final openaiOk = openai != null && _sttHasText(openai);
       final wordsOk = words != null && _sttHasText(words);
-      final TranscriptResult? primary =
-          wordsOk ? words : (openaiOk ? openai : openai ?? words);
+      final TranscriptResult? primary = wordsOk ? words : null;
       if (primary == null || !_sttHasText(primary)) {
         if (buttonNote) {
           _buttonNoteIds.remove(clip.id);
         }
-        if (openaiErr != null || wordsErr != null) {
-          throw openaiErr ?? wordsErr!;
+        if (wordsErr != null) {
+          throw wordsErr;
         }
         await _store.upsertClip(
           clip.copyWith(
             status: 'silence',
             fullText: '',
-            sttModel: openai?.model ?? words?.model,
+            sttModel: words?.model,
             segments: const [],
             billedS: speech.speechDurationS,
             removedS: speech.originalDurationS - speech.speechDurationS,
-            inputTokens: openai?.inputTokens ?? 0,
-            outputTokens: openai?.outputTokens ?? 0,
-            costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
+            inputTokens: words?.inputTokens ?? 0,
+            outputTokens: words?.outputTokens ?? 0,
+            costUsd: words?.costUsd ?? 0,
             clearAlt: true,
           ),
         );
@@ -1704,9 +1885,9 @@ class _HomePageState extends State<HomePage> {
             segments: const [],
             billedS: speech.speechDurationS,
             removedS: speech.originalDurationS - speech.speechDurationS,
-            inputTokens: openai?.inputTokens ?? 0,
-            outputTokens: openai?.outputTokens ?? 0,
-            costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
+            inputTokens: words?.inputTokens ?? 0,
+            outputTokens: words?.outputTokens ?? 0,
+            costUsd: words?.costUsd ?? 0,
             clearAlt: true,
           ),
         );
@@ -1728,8 +1909,25 @@ class _HomePageState extends State<HomePage> {
       }
 
       final primarySegs = _sttSegs(primary);
-      final journalSegs = segsWithoutNoteCommands(primarySegs);
-      final journalText = joinSegmentText(journalSegs);
+      var journalSegs = segsWithoutNoteCommands(primarySegs);
+      var journalText = joinSegmentText(journalSegs);
+      if (journalText.isEmpty) {
+        final plain = leftoverAfterNoteCommand(
+          noteTextWithoutSpeakers(primary.text.trim()),
+        );
+        if (plain.isNotEmpty) {
+          journalSegs = [
+            TranscriptSegment(
+              startS: 0,
+              endS: clip.durationS,
+              spokenAt: clip.startedAt,
+              text: plain,
+              rawText: plain,
+            ),
+          ];
+          journalText = plain;
+        }
+      }
       final journalOk = journalSegs.isNotEmpty && journalText.isNotEmpty;
 
       await _store.upsertClip(
@@ -1740,9 +1938,9 @@ class _HomePageState extends State<HomePage> {
           segments: journalSegs,
           billedS: speech.speechDurationS,
           removedS: speech.originalDurationS - speech.speechDurationS,
-          inputTokens: openai?.inputTokens ?? 0,
-          outputTokens: openai?.outputTokens ?? 0,
-          costUsd: (openai?.costUsd ?? 0) + (words?.costUsd ?? 0),
+          inputTokens: words?.inputTokens ?? 0,
+          outputTokens: words?.outputTokens ?? 0,
+          costUsd: words?.costUsd ?? 0,
           clearAlt: true,
         ),
       );
@@ -1763,8 +1961,11 @@ class _HomePageState extends State<HomePage> {
             ? friendlySaarasError(e)
             : 'Transcription failed. Please retry.',
       );
+      keepWav = true;
     } finally {
-      await _discardClipAudio(clip);
+      if (!keepWav) {
+        await _discardClipAudio(clip);
+      }
     }
   }
 
@@ -1974,6 +2175,9 @@ class _HomePageState extends State<HomePage> {
             live: _dev,
             rangeBar: _rangeBar(),
             onSdTest: _ble.isConnected ? _ble.runSdTest : null,
+            onSdSync: _ble.isConnected
+                ? () => _syncOfflineSd(manual: true)
+                : null,
           ),
         ),
       ),
@@ -2174,6 +2378,7 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) {
       return;
     }
+    unawaited(_resumeStuckStt());
     final recap = meeting.recap;
     if (recap != null) {
       await _syncRecapTasks(
@@ -2476,6 +2681,7 @@ class _HomePageState extends State<HomePage> {
           remoteId: _ble.device?.remoteId.str,
         ),
       );
+      await _onBleConnected();
       return null;
     }
 

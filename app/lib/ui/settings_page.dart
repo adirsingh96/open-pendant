@@ -403,21 +403,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
       ],
-      const SizedBox(height: 12),
-      SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: const Text('Diarization'),
-        subtitle: const Text(
-          'Saaras meetings also send audio to gpt-4o-transcribe-diarize so turns get speaker names. Enroll People to name them. Adds OpenAI cost. Not used with on-device Whisper.',
-        ),
-        value: _diarize,
-        onChanged: !_loaded
-            ? null
-            : (v) async {
-                setState(() => _diarize = v);
-                await SttPrefs.save(diarize: v);
-              },
-      ),
       const SizedBox(height: 26),
       Text('API KEYS', style: AppText.micro),
       const SizedBox(height: 6),
@@ -443,9 +428,7 @@ class _SettingsPageState extends State<SettingsPage> {
         obscureText: true,
         decoration: InputDecoration(
           labelText: 'OpenAI API key',
-          helperText: _diarize
-              ? 'Required for diarization, recap, and ask-about-this-meeting.'
-              : 'Used for recap and ask-about-this-meeting.',
+          helperText: 'Used for recap and ask-about-this-meeting.',
         ),
       ),
       const SizedBox(height: 12),

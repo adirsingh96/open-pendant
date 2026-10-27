@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenPendant — the case as a character</title>
+  <style>
+    :root {
+      --bg: #0c0b0a;
+      --panel: #161412;
+      --ink: #f4eee6;
+      --muted: #a89f94;
+      --line: #2c2824;
+      --accent: #ff4d00;
+      --accent-2: #ffb08a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); }
+    body { font: 16px/1.5 "Iowan Old Style", Palatino, Georgia, serif; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+    .kicker {
+      color: var(--accent);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+      margin: 0 0 10px;
+    }
+    h1 { font-size: 2.1rem; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.02em; }
+    p { margin: 0 0 12px; }
+    .lede { color: var(--muted); max-width: 46rem; }
+    a { color: var(--accent-2); }
+    #viewer-stage {
+      height: min(72vh, 680px);
+      background: #100e0c;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+    #cad { display: block; width: 100%; height: 100%; touch-action: none; }
+    .viewer-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      align-items: center;
+      margin: 12px 0;
+      font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+    }
+    .viewer-tools button {
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .viewer-tools button:hover,
+    .viewer-tools button.on { border-color: var(--accent); color: var(--accent-2); }
+    .viewer-tools input[type="range"] { width: 180px; accent-color: var(--accent); }
+    #note { color: var(--accent-2); max-width: 46rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="kicker">OpenPendant · case</p>
+    <h1>The case, as a character</h1>
+    <p class="lede">
+      The flared lugs are the ears. The cord still sits across them, and
+      the card still comes out the top. Eyes and the smile are only in
+      this picture, so you can see the whole case as one small character.
+      Drag to turn it.
+    </p>
+    <p><a href="carrier_ears.html">Back to the lug shapes</a></p>
+    <div class="viewer-tools">
+      <button type="button" class="on" data-face="happy">Happy</button>
+      <button type="button" data-face="sleepy">Sleepy</button>
+      <button type="button" data-face="surprised">Surprised</button>
+      <label>Pull the card out <input id="slide" type="range" min="0" max="1" step="0.01" value="0" /></label>
+    </div>
+    <div id="viewer-stage"><canvas id="cad"></canvas></div>
+    <p id="note">The two round cheeks sit where the button is. The one on the right is the real button; the left one is drawn in so the face matches. The dark slot at the bottom is the USB port. Fusion is unchanged.</p>
+  </div>
+  <script src="vendor/three.min.js"></script>
+  <script src="js/character_viewer.js?v=3"></script>
+</body>
+</html>

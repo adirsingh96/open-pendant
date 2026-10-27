@@ -21,6 +21,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/att.h>
+#include "sd_offline.h"
 
 #define MAX_SAMPLE_RATE  16000
 #define SAMPLE_BIT_WIDTH 16
@@ -42,6 +43,8 @@
 	BT_UUID_128_ENCODE(0x70301103, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
 #define PENDANT_CTRL_UUID_VAL \
 	BT_UUID_128_ENCODE(0x70301104, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
+#define PENDANT_SD_UUID_VAL \
+	BT_UUID_128_ENCODE(0x70301105, 0x4a1b, 0x4c8d, 0x9e0f, 0xa1b2c3d4e5f6)
 
 #define PCM_HDR_SIZE 4
 
@@ -61,6 +64,7 @@ static const struct bt_uuid_128 pendant_svc_uuid = BT_UUID_INIT_128(PENDANT_SVC_
 static const struct bt_uuid_128 pendant_pcm_uuid = BT_UUID_INIT_128(PENDANT_PCM_UUID_VAL);
 static const struct bt_uuid_128 pendant_status_uuid = BT_UUID_INIT_128(PENDANT_STATUS_UUID_VAL);
 static const struct bt_uuid_128 pendant_ctrl_uuid = BT_UUID_INIT_128(PENDANT_CTRL_UUID_VAL);
+static const struct bt_uuid_128 pendant_sd_uuid = BT_UUID_INIT_128(PENDANT_SD_UUID_VAL);
 
 /* Name in the primary packet so macOS CoreBluetooth sees it (31-byte ADV
  * cannot hold both a complete name and a 128-bit UUID). UUID is in the
@@ -79,9 +83,10 @@ static volatile bool ble_ok;
 static volatile bool pcm_notify_enabled;
 static volatile bool imu_sleep;
 static volatile bool status_notify_enabled;
-static uint8_t status_buf[10];
+static uint8_t status_buf[12];
 static int last_volume;
 static int64_t locate_until;
+static volatile bool sd_data_notify_enabled;
 
 /* Control byte 0 == 2 → SD card R/W self-test (Developer). */
 #define CTRL_LOCATE_OFF 0
@@ -104,6 +109,14 @@ static int64_t locate_until;
 
 static uint8_t sd_result = SD_RES_IDLE;
 static uint8_t sd_detail;
+static uint8_t sd_ctrl_buf[16];
+static uint16_t sd_ctrl_len;
+static void sd_ctrl_work_fn(struct k_work *work);
+static void sd_scan_work_fn(struct k_work *work);
+static void sd_btn_meeting_work_fn(struct k_work *work);
+static K_WORK_DEFINE(sd_ctrl_work, sd_ctrl_work_fn);
+static K_WORK_DEFINE(sd_scan_work, sd_scan_work_fn);
+static K_WORK_DEFINE(sd_btn_meeting_work, sd_btn_meeting_work_fn);
 static FATFS sd_fat;
 static struct fs_mount_t sd_mnt = {
 	.type = FS_FATFS,
@@ -127,8 +140,10 @@ static void status_notify(int volume);
 static void mic_set_run(bool on);
 static void ble_apply_conn_params(bool pcm_stream);
 static struct bt_conn *current_conn;
-static uint16_t pcm_seq;
+static uint8_t imu_still_hits;
+static bool imu_fetch_ok;
 static bool mic_running;
+static uint16_t pcm_seq;
 
 #define BTN_EV_NONE     0
 #define BTN_EV_SINGLE   1
@@ -175,9 +190,11 @@ static void leds_update(void)
 		led_set(&led_blue, !flash);
 		return;
 	}
-	if (pcm_notify_enabled || btn_note_held) {
+	if (pcm_notify_enabled || btn_note_held || sd_offline_meeting_active()) {
 		led_set(&led_green, 0);
-		led_set(&led, pcm_notify_enabled ? 1 : 0);
+		led_set(&led,
+			(pcm_notify_enabled || sd_offline_meeting_active()) ? 1
+									    : 0);
 		if (!btn_note_held) {
 			led_set(&led_blue, 0);
 		}
@@ -245,9 +262,12 @@ static void btn_work_fn(struct k_work *work)
 			btn_clicks = 0;
 			if (btn_note_held) {
 				btn_note_held = false;
+				if (!pcm_notify_enabled && current_conn == NULL) {
+					(void)sd_offline_note_stop();
+				}
 				note_led(false);
 				leds_update();
-				if (imu_sleep) {
+				if (imu_sleep && !sd_offline_recording()) {
 					mic_set_run(false);
 				}
 				btn_emit(BTN_EV_LONG_UP);
@@ -261,6 +281,12 @@ static void btn_work_fn(struct k_work *work)
 		btn_clicks = 0;
 		btn_note_held = true;
 		mic_set_run(true);
+		/* Offline SD only with no phone link; connected = live note via app. */
+		if (!pcm_notify_enabled && current_conn == NULL) {
+			if (sd_offline_note_start() != 0) {
+				printk("SD note start failed\n");
+			}
+		}
 		note_led(true);
 		leds_update();
 		btn_emit(BTN_EV_LONG);
@@ -269,6 +295,10 @@ static void btn_work_fn(struct k_work *work)
 	if (!btn_pressed && btn_clicks == 1 &&
 	    (now - btn_release_ms) >= BTN_DOUBLE_MS) {
 		btn_clicks = 0;
+		/* Offline SD meeting only when BLE is disconnected. */
+		if (!pcm_notify_enabled && current_conn == NULL) {
+			k_work_submit(&sd_btn_meeting_work);
+		}
 		btn_emit(BTN_EV_SINGLE);
 	}
 }
@@ -313,8 +343,6 @@ static void btn_setup(void)
 static int32_t imu_hist[IMU_HIST];
 static uint8_t imu_hist_n;
 static uint8_t imu_hist_i;
-static uint8_t imu_still_hits;
-static bool imu_fetch_ok;
 
 static void mic_set_run(bool on)
 {
@@ -416,6 +444,9 @@ static void imu_poll(int volume)
 		imu_still_hits++;
 	}
 	if (pcm_notify_enabled) {
+		return;
+	}
+	if (sd_offline_recording()) {
 		return;
 	}
 	if (!imu_sleep && imu_still_hits >= IMU_STILL_HITS) {
@@ -524,6 +555,8 @@ static void sd_test_work_fn(struct k_work *work)
 	ARG_UNUSED(work);
 
 	printk("SD test start (CS=D6 CLK=D9 MOSI=D8 MISO=D7)\n");
+	/* Drop offline mount so this test owns the disk cleanly. */
+	sd_offline_unmount();
 	sd_unmount();
 
 	err = disk_access_ioctl(SD_DISK_NAME, DISK_IOCTL_CTRL_INIT, NULL);
@@ -618,7 +651,8 @@ static void status_fill(int volume)
 			(device_is_ready(imu_dev) ? 4 : 0) |
 			(imu_fetch_ok ? 8 : 0) |
 			(nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ? 16 : 0) |
-			(btn_note_held ? 32 : 0);
+			(btn_note_held ? 32 : 0) |
+			(sd_offline_recording() ? 64 : 0);
 	sys_put_le16((uint16_t)v, &status_buf[1]);
 	status_buf[3] = imu_still_hits;
 	sys_put_le16(battery_sample_mv(), &status_buf[4]);
@@ -626,6 +660,7 @@ static void status_fill(int volume)
 	status_buf[7] = btn_seq;
 	status_buf[8] = sd_result;
 	status_buf[9] = sd_detail;
+	sys_put_le16(sd_offline_pending_count(), &status_buf[10]);
 }
 
 static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -634,6 +669,80 @@ static ssize_t status_read(struct bt_conn *conn, const struct bt_gatt_attr *attr
 	status_fill(0);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, status_buf,
 				 sizeof(status_buf));
+}
+
+static void sd_data_send(const uint8_t *data, uint16_t len);
+
+static void sd_scan_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	sd_offline_scan();
+	status_notify(last_volume);
+}
+
+static void sd_finalize_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	printk("Finalizing offline SD for phone sync\n");
+	sd_offline_finalize();
+	status_notify(last_volume);
+}
+
+static K_WORK_DEFINE(sd_finalize_work, sd_finalize_work_fn);
+
+static void sd_abort_live_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	/* FatFS must not run on the BLE CCC callback thread. */
+	sd_offline_abort_for_live();
+	status_notify(last_volume);
+}
+
+static K_WORK_DEFINE(sd_abort_live_work, sd_abort_live_work_fn);
+
+static void sd_btn_meeting_work_fn(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+	err = sd_offline_meeting_toggle();
+	if (err) {
+		printk("SD meeting toggle failed (%d)\n", err);
+		sd_set_result(SD_RES_FAIL_MOUNT, (uint8_t)(-err));
+		/* Blink red so offline SD failures are visible without USB. */
+		for (int i = 0; i < 5; i++) {
+			led_set(&led, 1);
+			k_msleep(70);
+			led_set(&led, 0);
+			k_msleep(70);
+		}
+		leds_update();
+		status_notify(last_volume);
+		return;
+	}
+	imu_sleep = false;
+	imu_still_hits = 0;
+	if (sd_offline_meeting_active()) {
+		mic_set_run(true);
+	} else if (imu_sleep) {
+		mic_set_run(false);
+	}
+	leds_update();
+	status_notify(last_volume);
+	printk("SD offline meeting %s\n",
+	       sd_offline_meeting_active() ? "ON" : "OFF");
+}
+
+static void sd_ctrl_work_fn(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+	err = sd_offline_ctrl(sd_ctrl_buf, sd_ctrl_len, sd_data_send);
+	if (err) {
+		printk("SD ctrl 0x%02x err %d\n", sd_ctrl_buf[0], err);
+	}
+	status_notify(last_volume);
 }
 
 static ssize_t control_write(struct bt_conn *conn,
@@ -654,6 +763,10 @@ static ssize_t control_write(struct bt_conn *conn,
 			printk("SD test already running\n");
 			return len;
 		}
+		if (sd_offline_recording()) {
+			printk("SD test blocked — offline recording\n");
+			return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+		}
 		sd_result = SD_RES_BUSY;
 		sd_detail = 0;
 		status_notify(last_volume);
@@ -661,16 +774,49 @@ static ssize_t control_write(struct bt_conn *conn,
 		printk("SD test queued\n");
 		return len;
 	}
+	if (p[0] == SD_CTRL_LIST || p[0] == SD_CTRL_OPEN ||
+	    p[0] == SD_CTRL_READ || p[0] == SD_CTRL_DELETE) {
+		if (len > sizeof(sd_ctrl_buf)) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (k_work_is_pending(&sd_ctrl_work)) {
+			printk("SD ctrl busy — drop 0x%02x\n", p[0]);
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
+		memcpy(sd_ctrl_buf, p, len);
+		sd_ctrl_len = len;
+		k_work_submit(&sd_ctrl_work);
+		return len;
+	}
 	if (p[0] == CTRL_LOCATE_ON) {
 		locate_until = k_uptime_get() + 60000;
 		printk("Locate ON\n");
-	} else {
+	} else if (p[0] == CTRL_LOCATE_OFF) {
 		locate_until = 0;
 		printk("Locate OFF\n");
 	}
 	leds_update();
 	return len;
 }
+
+static void sd_data_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	sd_data_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+	printk("SD data notify %s\n", sd_data_notify_enabled ? "ON" : "OFF");
+}
+
+static ssize_t sd_data_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			    void *buf, uint16_t len, uint16_t offset)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(offset);
+	return 0;
+}
+
+static void sd_data_send(const uint8_t *data, uint16_t len);
 
 static void status_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
@@ -684,6 +830,7 @@ static void pcm_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	pcm_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
 	printk("PCM notify %s\n", pcm_notify_enabled ? "ON" : "OFF");
 	if (pcm_notify_enabled) {
+		k_work_submit(&sd_abort_live_work);
 		imu_sleep = false;
 		imu_still_hits = 0;
 		mic_set_run(true);
@@ -692,6 +839,7 @@ static void pcm_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 		ble_apply_conn_params(false);
 	}
 	leds_update();
+	status_notify(last_volume);
 }
 
 BT_GATT_SERVICE_DEFINE(pendant_svc,
@@ -710,7 +858,34 @@ BT_GATT_SERVICE_DEFINE(pendant_svc,
 			       BT_GATT_CHRC_WRITE |
 				       BT_GATT_CHRC_WRITE_WITHOUT_RESP,
 			       BT_GATT_PERM_WRITE, NULL, control_write, NULL),
+	BT_GATT_CHARACTERISTIC(&pendant_sd_uuid.uuid,
+			       BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ,
+			       sd_data_read, NULL, NULL),
+	BT_GATT_CCC(sd_data_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
+
+static void sd_data_send(const uint8_t *data, uint16_t len)
+{
+	int err;
+
+	if (!sd_data_notify_enabled || current_conn == NULL) {
+		printk("SD data drop (notify off)\n");
+		return;
+	}
+	for (int tries = 0; tries < 12; tries++) {
+		err = bt_gatt_notify(current_conn, &pendant_svc.attrs[10], data,
+				     len);
+		if (err == 0) {
+			return;
+		}
+		if (err != -ENOMEM && err != -EAGAIN) {
+			printk("SD data notify err %d\n", err);
+			return;
+		}
+		k_sleep(K_MSEC(2));
+	}
+}
 
 static void status_notify(int volume)
 {
@@ -895,6 +1070,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	printk("BLE connected\n");
 
 	ble_apply_conn_params(pcm_notify_enabled);
+	/* Close any open offline files so BLE sync sees full PCM on disk. */
+	k_work_submit(&sd_finalize_work);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -904,11 +1081,15 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	printk("BLE disconnected (reason 0x%02x)\n", reason);
 	pcm_notify_enabled = false;
 	status_notify_enabled = false;
-	btn_note_held = false;
+	sd_data_notify_enabled = false;
 	locate_until = 0;
-	note_led(false);
-	led_set(&led, 0);
-	led_set(&led_green, 0);
+	/* Finish an in-progress offline note; leave meetings running for SD. */
+	if (btn_note_held) {
+		btn_note_held = false;
+		(void)sd_offline_note_stop();
+		note_led(false);
+	}
+	leds_update();
 
 	if (current_conn) {
 		bt_conn_unref(current_conn);
@@ -950,6 +1131,8 @@ static int ble_start(void)
 	}
 
 	ble_ok = true;
+	/* Catalog SD after advertising is up so a missing card cannot block BLE. */
+	k_work_submit(&sd_scan_work);
 	printk("Advertising as \"%s\"\n", DEVICE_NAME);
 	return 0;
 }
@@ -1004,6 +1187,7 @@ int main(void)
 		gpio_pin_configure_dt(&led_blue, GPIO_OUTPUT_INACTIVE);
 	}
 	btn_setup();
+	sd_offline_init();
 
 	printk("Booting OpenPendant (GATT PCM stream)...\n");
 
@@ -1069,7 +1253,7 @@ int main(void)
 
 	while (1) {
 		leds_update();
-		if (imu_sleep) {
+		if (imu_sleep && !sd_offline_recording()) {
 			imu_poll(0);
 			status_notify(0);
 			k_sleep(K_MSEC(50));
@@ -1084,6 +1268,8 @@ int main(void)
 			mic_running = true;
 			continue;
 		}
+
+		sd_offline_write_pcm(buffer, size);
 
 		if (pcm_notify_chunk(buffer, size) == 0) {
 			if (pcm_notify_enabled) {

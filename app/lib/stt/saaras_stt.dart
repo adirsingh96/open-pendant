@@ -15,19 +15,25 @@ import 'voice_store.dart';
 /// Sarvam Saaras v4 REST. Speaker diarization is Batch-only and too slow
 /// for live ≤30s pendant clips, so live capture uses REST timestamps.
 ///
-/// REST rejects audio longer than 30s; we stay under that with ~28s chunks.
+/// REST rejects audio longer than 30s. Requests near that cap were coming
+/// back as 503 while shorter clips in the same meeting succeeded, so each
+/// upload stays at or under 12s.
 class SaarasStt {
-  SaarasStt({http.Client? client}) : _client = client ?? http.Client();
+  SaarasStt({http.Client? client, this.retryPause = const Duration(milliseconds: 800)})
+      : _client = client ?? http.Client();
 
   static const modelId = 'saaras:v4';
   static const _rest = 'https://api.sarvam.ai/speech-to-text';
+  static const maxAttempts = 4;
 
-  /// Exclusive 30s API cap — use a margin so boundary clips still succeed.
-  static const maxRestSeconds = 28.0;
+  /// Uploads above this were refused. Shorter pieces in the same meeting
+  /// succeeded, so stay well under the 30s API cap.
+  static const maxRestSeconds = 12.0;
   static const sampleRate = 16000;
   static const bytesPerSample = 2;
 
   final http.Client _client;
+  final Duration retryPause;
 
   Future<TranscriptResult> transcribe({
     required File wav,
@@ -99,34 +105,49 @@ class SaarasStt {
     required double concatOffsetS,
     required double billedSeconds,
   }) async {
-    final req = http.MultipartRequest('POST', Uri.parse(_rest));
-    req.persistentConnection = false;
-    req.headers['api-subscription-key'] = apiKey;
-    req.fields['model'] = modelId;
-    req.fields['mode'] = 'transcribe';
-    req.fields['with_timestamps'] = 'true';
-    req.files.add(
-      await http.MultipartFile.fromPath(
-        'file',
-        wav.path,
-        filename: 'clip.wav',
-      ),
-    );
-    final streamed =
-        await _client.send(req).timeout(const Duration(seconds: 120));
-    final body = await streamed.stream.bytesToString();
-    if (streamed.statusCode >= 400) {
-      throw Exception('saaras:v4 REST ${streamed.statusCode}: $body');
+    Object? lastError;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final req = http.MultipartRequest('POST', Uri.parse(_rest));
+        req.persistentConnection = false;
+        req.headers['api-subscription-key'] = apiKey;
+        req.fields['model'] = modelId;
+        req.fields['mode'] = 'transcribe';
+        req.fields['with_timestamps'] = 'true';
+        req.files.add(
+          await http.MultipartFile.fromPath(
+            'file',
+            wav.path,
+            filename: 'clip.wav',
+          ),
+        );
+        final streamed =
+            await _client.send(req).timeout(const Duration(seconds: 120));
+        final body = await streamed.stream.bytesToString();
+        if (streamed.statusCode >= 400) {
+          throw Exception('saaras:v4 REST ${streamed.statusCode}: $body');
+        }
+        final json = jsonDecode(body) as Map<String, dynamic>;
+        return parseSaarasTranscript(
+          json: json,
+          model: modelId,
+          startedAt: startedAt,
+          speech: speech,
+          concatOffsetS: concatOffsetS,
+          billedSeconds: billedSeconds,
+        );
+      } catch (e) {
+        lastError = e;
+        if (!isSaarasRetryable(e) || attempt == maxAttempts - 1) {
+          rethrow;
+        }
+        final wait = retryPause * (1 << attempt);
+        if (wait > Duration.zero) {
+          await Future<void>.delayed(wait);
+        }
+      }
     }
-    final json = jsonDecode(body) as Map<String, dynamic>;
-    return parseSaarasTranscript(
-      json: json,
-      model: modelId,
-      startedAt: startedAt,
-      speech: speech,
-      concatOffsetS: concatOffsetS,
-      billedSeconds: billedSeconds,
-    );
+    throw lastError ?? Exception('saaras:v4 REST failed');
   }
 }
 
@@ -220,6 +241,23 @@ bool isSaarasAuthError(Object error) {
       text.contains('rest 403');
 }
 
+bool isSaarasRetryable(Object error) {
+  if (error is SocketException ||
+      error is HttpException ||
+      error is HandshakeException ||
+      error is TlsException) {
+    return true;
+  }
+  final text = error.toString().toLowerCase();
+  return text.contains('rest 429') ||
+      text.contains('rest 502') ||
+      text.contains('rest 503') ||
+      text.contains('rest 504') ||
+      text.contains('timeout') ||
+      text.contains('connection reset') ||
+      text.contains('connection closed');
+}
+
 bool isSaarasDurationError(Object error) {
   final text = error.toString().toLowerCase();
   return text.contains('duration') ||
@@ -238,6 +276,12 @@ String friendlySaarasError(Object error) {
   }
   if (text.toLowerCase().contains('timeout')) {
     return 'Sarvam timed out. The clip can be retried.';
+  }
+  if (RegExp(r'REST 50[234]').hasMatch(text)) {
+    return 'Sarvam is busy right now. The clip can be retried.';
+  }
+  if (text.contains('REST 429')) {
+    return 'Sarvam rate limit. Wait a moment and retry.';
   }
   final status = RegExp(r'REST (\d{3})').firstMatch(text)?.group(1);
   return status == null
@@ -298,34 +342,8 @@ TranscriptResult parseSaarasTranscript({
 }) {
   final segs = <TranscriptSegment>[];
   final full = (json['transcript'] as String? ?? '').trim();
-  final diar = json['diarized_transcript'];
-  if (diar is Map && diar['entries'] is List) {
-    for (final item in diar['entries'] as List) {
-      if (item is! Map) {
-        continue;
-      }
-      final m = Map<String, dynamic>.from(item);
-      final text = '${m['transcript'] ?? m['text'] ?? ''}'.trim();
-      if (text.isEmpty) {
-        continue;
-      }
-      final start =
-          ((m['start_time_seconds'] as num?)?.toDouble() ?? 0) + concatOffsetS;
-      final end =
-          ((m['end_time_seconds'] as num?)?.toDouble() ?? (start - concatOffsetS)) +
-              concatOffsetS;
-      segs.add(
-        _seg(
-          start: start,
-          end: end,
-          text: text,
-          speaker: saarasSpeakerLabel(m['speaker_id']),
-          startedAt: startedAt,
-          speech: speech,
-        ),
-      );
-    }
-  }
+  // A diarized split assigns words by the clock, not by who said them.
+  // With two voices that scrambled the meeting. Keep the one transcript.
   // Word timestamps are often split badly for Hindi. Prefer the API's
   // `transcript` string as-is; keep timestamps only for the time span.
   if (segs.isEmpty && full.isNotEmpty) {

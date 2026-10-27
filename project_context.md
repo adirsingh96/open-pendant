@@ -35,24 +35,27 @@ People should be able to build their own pendant from a short BOM, flash UF2, an
     *   byte 2: fragment index
     *   byte 3: fragment count
     *   bytes 4+: 16 kHz / 16-bit little-endian mono PCM
-*   **Status UUID:** `70301103-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (READ/NOTIFY)
-    *   byte 0: flags (`1` IMU sleep, `2` mic running, `4` IMU ready, `8` last accel fetch ok, `16` USB VBUS)
+*   **Status UUID:** `70301103-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (READ/NOTIFY) — 12 bytes
+    *   byte 0: flags (`1` IMU sleep, `2` mic running, `4` IMU ready, `8` last accel fetch ok, `16` USB VBUS, `32` note held, `64` offline SD recording)
     *   bytes 1–2: LE volume
     *   byte 3: consecutive still polls (sleep at 10)
     *   bytes 4–5: LE battery millivolts (0 = no reading). App maps 3.30–4.20 V to ~0–100% **only when USB is unplugged** (charger rail is ~4.1 V with no cell).
     *   bytes 6–7: button event + sequence (`1` single, `2` double, `3` long-down, `4` long-up). Double-click rings the connected phone.
-*   **Control UUID:** `70301104-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (WRITE). Byte 0 `1` flashes LEDs for 60 s (find pendant); `0` stops. Host uses BLE RSSI as closer/farther, not a compass heading.
-*   **Consent:** enabling Notify is recording. The red LED stays on while notify is enabled.
+    *   bytes 8–9: SD self-test result / detail
+    *   bytes 10–11: LE16 pending offline clip count
+*   **Control UUID:** `70301104-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (WRITE). Byte 0 `1` flashes LEDs for 60 s (find pendant); `0` stops; `2` SD self-test; `0x10`–`0x13` offline SD list / open / read / delete (see README).
+*   **SD data UUID:** `70301105-4a1b-4c8d-9e0f-a1b2c3d4e5f6` (NOTIFY/READ) — offline sync payloads (list entry / read chunk / end). Live PCM stays on `70301102`.
+*   **Consent:** enabling Notify on PCM is live recording. Offline capture uses the button when PCM notify is off; files land under `/SD:/op/`.
+*   **Offline UX:** single click toggles meeting on SD; long-press note; app pulls pending clips on reconnect (dedup via `clips.pendant_clip_id`).
 
 ## Transcription pipeline (host)
-**Record** arms notify once. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local spectral VAD must see enough speech before STT. Meetings use a fixed energy floor (`1e9`, 0.5 s min); notes use the optional wearer-calibrated floor. Text is stitched by `session_id` + `seq`. WAV files are deleted after STT.
+**Record** arms notify once. Chunks rotate on IMU sleep, ~30 s raw, or quiet after speech. Local spectral VAD must see enough speech before STT. Meetings use a fixed energy floor (`1e9`, 0.5 s min); notes use the optional wearer-calibrated floor. Text is stitched by `session_id` + `seq`. WAV files are deleted after STT. Offline SD clips reuse the same WAV → `_enqueueStt` path after BLE pull.
 
 *   **STT:** Saaras v4 (cloud) or on-device Qwen3-ASR 0.6B (INT8 via sherpa-onnx). Optional OpenAI `gpt-4o-transcribe-diarize` for who spoke on the Saaras path (Settings toggle; People samples as references). Meeting recap is OpenAI. Keys on the phone only.
-*   **clips:** `id`, `started_at`, `duration_s`, `full_text`, `wav_path`, `stt_model`, `status`, `session_id`, `seq`, billed/removed seconds, tokens, `cost_usd`
+*   **clips:** `id`, `started_at`, `duration_s`, `full_text`, `wav_path`, `stt_model`, `status`, `session_id`, `seq`, billed/removed seconds, tokens, `cost_usd`, optional `pendant_clip_id` (hex id from SD for reconnect dedup)
 *   **segments:** `start_s`, `end_s`, `spoken_at`, `text`, `speaker`
 *   **notes:** spoken text plus `due_at` / `done`. A clock in the note schedules a local notification 15 minutes before; otherwise still-open notes are in the next 8 AM digest.
 *   Later sync (not built): [docs/sync_api.md](docs/sync_api.md)
-
 Laptop A/B:
 
 ```text

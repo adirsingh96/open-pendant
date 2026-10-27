@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenPendant — carrier size preview</title>
+  <style>
+    :root {
+      --bg: #0c0b0a;
+      --panel: #161412;
+      --ink: #f4eee6;
+      --muted: #a89f94;
+      --line: #2c2824;
+      --accent: #ff4d00;
+      --accent-2: #ffb08a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); }
+    body { font: 16px/1.5 "Iowan Old Style", Palatino, Georgia, serif; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+    .kicker {
+      color: var(--accent);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+      margin: 0 0 10px;
+    }
+    h1 { font-size: 2.1rem; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.02em; }
+    p { margin: 0 0 12px; }
+    .lede { color: var(--muted); max-width: 46rem; }
+    a { color: var(--accent-2); }
+    #viewer-stage {
+      height: min(72vh, 680px);
+      background: #100e0c;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+    #cad { display: block; width: 100%; height: 100%; touch-action: none; }
+    .viewer-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      align-items: center;
+      margin: 12px 0;
+      font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+    }
+    .viewer-tools button {
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .viewer-tools button:hover { border-color: var(--accent); }
+    .viewer-tools input[type="range"] { width: 140px; accent-color: var(--accent); }
+    #pick-hint { color: var(--accent-2); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+      margin-top: 18px;
+    }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 500; }
+    caption {
+      text-align: left;
+      font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="kicker">OpenPendant · size</p>
+    <h1>Carrier next to what you wear</h1>
+    <p class="lede">
+      Both models are millimetres, same scale. Left is the tested strip. Right is the
+      23 × 38 mm carrier: the same XIAO, a flat microSD socket, and the same cell on the back.
+      The coin is a ₹5, 23 mm across, so the carrier width matches it. Drag to turn, scroll to zoom.
+      The card sticks out of the socket so the slot is obvious. This is a size model, not a finished board.
+    </p>
+    <p><a href="carrier_assembly.html">What JLCPCB sends, and the soldering after</a></p>
+    <div class="viewer-tools">
+      <button type="button" data-view="both">Both</button>
+      <button type="button" data-view="today">Today</button>
+      <button type="button" data-view="next">Carrier</button>
+      <label>Pull apart <input id="explode" type="range" min="0" max="1" step="0.01" value="0.35" /></label>
+      <label><input id="labels" type="checkbox" checked /> Labels</label>
+      <span id="pick-hint">Click a part</span>
+    </div>
+    <div id="viewer-stage"><canvas id="cad"></canvas></div>
+    <table>
+      <caption>Outline of the electronics only, before a printed case. Source: assembly notes and the carrier layout.</caption>
+      <thead>
+        <tr><th></th><th>Width</th><th>Length</th><th>Thickness</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Today, strip + breakout + cell</td><td>23 mm</td><td>48 mm</td><td>15 mm</td></tr>
+        <tr><td>Carrier + socket + cell</td><td>23 mm</td><td>38 mm</td><td>11 mm</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <script src="vendor/three.min.js"></script>
+  <script src="js/carrier_viewer.js"></script>
+</body>
+</html>

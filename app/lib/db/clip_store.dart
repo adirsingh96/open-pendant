@@ -24,7 +24,7 @@ class ClipStore {
     final path = p.join(dir.path, 'openpendant.db');
     _db = await openDatabase(
       path,
-      version: 12,
+      version: 13,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE clips (
@@ -49,8 +49,13 @@ CREATE TABLE clips (
   alt_full_text TEXT NOT NULL DEFAULT '',
   alt_cost_usd REAL NOT NULL DEFAULT 0,
   alt_error TEXT NOT NULL DEFAULT '',
-  alt_segments_json TEXT NOT NULL DEFAULT '[]'
+  alt_segments_json TEXT NOT NULL DEFAULT '[]',
+  pendant_clip_id TEXT
 )''');
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_pendant_id '
+          'ON clips(pendant_clip_id) WHERE pendant_clip_id IS NOT NULL',
+        );
         await _createSegmentTable(db);
         await _createDayRecapTable(db);
         await _createMemoryChatTable(db);
@@ -139,6 +144,13 @@ CREATE TABLE clips (
         if (oldVersion < 12) {
           await _upgradeNoteKind(db);
         }
+        if (oldVersion < 13) {
+          await db.execute('ALTER TABLE clips ADD COLUMN pendant_clip_id TEXT');
+          await db.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_pendant_id '
+            'ON clips(pendant_clip_id) WHERE pendant_clip_id IS NOT NULL',
+          );
+        }
       },
     );
     await _ensureNotesTable(_db!);
@@ -174,20 +186,20 @@ CREATE TABLE segments (
       await txn.insert(
           'clips',
           {
-            'id': clip.id,
-            'started_at': clip.startedAt.toUtc().toIso8601String(),
-            'duration_s': clip.durationS,
-            'full_text': clip.fullText,
-            'wav_path': clip.wavPath,
-            'stt_model': clip.sttModel,
-            'status': clip.status,
-            'session_id': clip.sessionId,
-            'seq': clip.seq,
-            'billed_s': clip.billedS,
-            'removed_s': clip.removedS,
-            'input_tokens': clip.inputTokens,
-            'output_tokens': clip.outputTokens,
-            'cost_usd': clip.costUsd,
+        'id': clip.id,
+        'started_at': clip.startedAt.toUtc().toIso8601String(),
+        'duration_s': clip.durationS,
+        'full_text': clip.fullText,
+        'wav_path': clip.wavPath,
+        'stt_model': clip.sttModel,
+        'status': clip.status,
+        'session_id': clip.sessionId,
+        'seq': clip.seq,
+        'billed_s': clip.billedS,
+        'removed_s': clip.removedS,
+        'input_tokens': clip.inputTokens,
+        'output_tokens': clip.outputTokens,
+        'cost_usd': clip.costUsd,
             'refine_input_tokens': clip.refineInputTokens,
             'refine_output_tokens': clip.refineOutputTokens,
             'refine_cost_usd': clip.refineCostUsd,
@@ -197,6 +209,7 @@ CREATE TABLE segments (
             'alt_error': clip.altError,
             'alt_segments_json':
                 jsonEncode(encodeAltSegments(clip.altSegments)),
+            'pendant_clip_id': clip.pendantClipId,
           },
           conflictAlgorithm: ConflictAlgorithm.replace);
       await txn.delete('segments', where: 'clip_id = ?', whereArgs: [clip.id]);
@@ -296,12 +309,12 @@ ORDER BY c.started_at DESC
     return TranscriptSegment(
       id: s['id'] as int?,
       clipId: s['clip_id'] as String?,
-      startS: (s['start_s'] as num).toDouble(),
-      endS: (s['end_s'] as num).toDouble(),
-      spokenAt: DateTime.parse(s['spoken_at'] as String),
+            startS: (s['start_s'] as num).toDouble(),
+            endS: (s['end_s'] as num).toDouble(),
+            spokenAt: DateTime.parse(s['spoken_at'] as String),
       text: text,
       rawText: raw.trim().isEmpty ? text : raw,
-      speaker: s['speaker'] as String?,
+            speaker: s['speaker'] as String?,
     );
   }
 
@@ -825,6 +838,51 @@ CREATE TABLE IF NOT EXISTS notes (
     return clips;
   }
 
+  Future<List<ClipRecord>> listClipsWithStatus(Iterable<String> statuses) async {
+    final db = await _open();
+    final wanted = statuses.toSet().toList();
+    if (wanted.isEmpty) {
+      return const [];
+    }
+    final marks = List.filled(wanted.length, '?').join(',');
+    final rows = await db.query(
+      'clips',
+      where: 'status IN ($marks)',
+      whereArgs: wanted,
+      orderBy: 'started_at ASC',
+    );
+    final clips = <ClipRecord>[];
+    for (final row in rows) {
+      clips.add(await _clipFromRow(db, row));
+    }
+    return clips;
+  }
+
+  Future<List<MeetingRecord>> listOpenMeetings() async {
+    final db = await _open();
+    final rows = await db.query(
+      'meetings',
+      where: 'ended_at IS NULL OR ended_at = ?',
+      whereArgs: [''],
+      orderBy: 'started_at ASC',
+    );
+    final out = <MeetingRecord>[];
+    for (final r in rows) {
+      final id = r['id'] as String;
+      out.add(
+        MeetingRecord(
+          id: id,
+          startedAt: DateTime.tryParse(r['started_at'] as String? ?? '') ??
+              DateTime.fromMillisecondsSinceEpoch(0),
+          endedAt: DateTime.tryParse(r['ended_at'] as String? ?? ''),
+          title: r['title'] as String? ?? '',
+          clips: await _clipsForSession(db, id),
+        ),
+      );
+    }
+    return out;
+  }
+
   DayRecap? _meetingRecapFromRow(Map<String, Object?> r) {
     final raw = (r['recap_json'] as String? ?? '').trim();
     if (raw.isEmpty) {
@@ -1181,6 +1239,41 @@ FROM clips
         clipId: id,
       ),
       segments: segs.map(_segmentFromRow).toList(),
+      pendantClipId: row['pendant_clip_id'] as String?,
+    );
+  }
+
+  Future<bool> hasPendantClipId(String pendantClipId) async {
+    final db = await _open();
+    final rows = await db.query(
+      'clips',
+      columns: ['id'],
+      where: 'pendant_clip_id = ?',
+      whereArgs: [pendantClipId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  Future<MeetingRecord?> getMeeting(String id) async {
+    final db = await _open();
+    final rows = await db.query(
+      'meetings',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    final row = rows.first;
+    return MeetingRecord(
+      id: row['id'] as String,
+      startedAt: DateTime.parse(row['started_at'] as String),
+      endedAt: row['ended_at'] == null
+          ? null
+          : DateTime.parse(row['ended_at'] as String),
+      title: row['title'] as String? ?? '',
     );
   }
 }

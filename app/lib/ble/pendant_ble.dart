@@ -9,6 +9,45 @@ const pendantServiceUuid = '70301101-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 const pcmCharUuid = '70301102-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 const statusCharUuid = '70301103-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
 const controlCharUuid = '70301104-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
+const sdDataCharUuid = '70301105-4a1b-4c8d-9e0f-a1b2c3d4e5f6';
+
+const sdCtrlList = 0x10;
+const sdCtrlOpen = 0x11;
+const sdCtrlRead = 0x12;
+const sdCtrlDelete = 0x13;
+const sdMsgList = 0x10;
+const sdMsgRead = 0x12;
+const sdMsgEnd = 0x1f;
+const sdKindMeeting = 1;
+const sdKindNote = 2;
+
+String pendantClipIdHex(List<int> id) {
+  final b = StringBuffer();
+  for (final v in id) {
+    b.write(v.toRadixString(16).padLeft(2, '0'));
+  }
+  return b.toString();
+}
+
+class SdPendingClip {
+  SdPendingClip({
+    required this.id,
+    required this.kind,
+    required this.size,
+    required this.seq,
+    required this.session,
+  });
+
+  final List<int> id;
+  final int kind;
+  final int size;
+  final int seq;
+  final String session;
+
+  String get idHex => pendantClipIdHex(id);
+  bool get isMeeting => kind == sdKindMeeting;
+  bool get isNote => kind == sdKindNote;
+}
 
 class PendantStatus {
   PendantStatus({
@@ -24,8 +63,10 @@ class PendantStatus {
     this.buttonEvent = 0,
     this.buttonSeq = 0,
     this.noteHeld = false,
+    this.offlineRecording = false,
     this.sdResult = 0,
     this.sdDetail = 0,
+    this.pendingSdCount = 0,
   });
 
   final bool imuSleep;
@@ -40,8 +81,10 @@ class PendantStatus {
   final int buttonEvent;
   final int buttonSeq;
   final bool noteHeld;
+  final bool offlineRecording;
   final int sdResult;
   final int sdDetail;
+  final int pendingSdCount;
 
   String get buttonLabel {
     switch (buttonEvent) {
@@ -146,8 +189,10 @@ class PendantStatus {
       buttonEvent: data.length >= 8 ? data[6] : 0,
       buttonSeq: data.length >= 8 ? data[7] : 0,
       noteHeld: (flags & 32) != 0,
+      offlineRecording: (flags & 64) != 0,
       sdResult: data.length >= 10 ? data[8] : 0,
       sdDetail: data.length >= 10 ? data[9] : 0,
+      pendingSdCount: data.length >= 12 ? (data[10] | (data[11] << 8)) : 0,
     );
   }
 }
@@ -162,8 +207,10 @@ class PendantBle {
   BluetoothCharacteristic? _pcm;
   BluetoothCharacteristic? _status;
   BluetoothCharacteristic? _control;
+  BluetoothCharacteristic? _sdData;
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<List<int>>? _statusSub;
+  StreamSubscription<List<int>>? _sdDataSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
   final PcmReassembler reassembler = PcmReassembler();
@@ -171,6 +218,9 @@ class PendantBle {
   void Function(PendantStatus status)? onStatus;
   PendantStatus? lastStatus;
   bool _intentionalDisconnect = false;
+  final _sdInbox = <List<int>>[];
+  Completer<List<int>>? _sdWait;
+  bool _sdSyncBusy = false;
 
   /// Starts CoreBluetooth so the first Connect tap is not racing adapter init.
   void warmup() {
@@ -288,7 +338,19 @@ class PendantBle {
       remoteId: d.remoteId.str,
     );
     await _connSub?.cancel();
+    await _sdDataSub?.cancel();
+    _sdDataSub = null;
     await d.connect(timeout: const Duration(seconds: 20));
+    // Subscribe early so a drop during discovery is handled cleanly.
+    _connSub = d.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        _pcm = null;
+        _sdData = null;
+        if (!_intentionalDisconnect) {
+          onConnectionLost?.call();
+        }
+      }
+    });
     try {
       await d.requestMtu(247);
     } catch (_) {}
@@ -296,17 +358,18 @@ class PendantBle {
     _pcm = null;
     _status = null;
     _control = null;
+    _sdData = null;
     for (final s in services) {
       for (final c in s.characteristics) {
-        final id = c.uuid.str.toLowerCase();
-        if (id == pcmCharUuid) {
+        final id = c.uuid.str.toLowerCase().replaceAll('-', '');
+        if (id == pcmCharUuid.replaceAll('-', '')) {
           _pcm = c;
-        }
-        if (id == statusCharUuid) {
+        } else if (id == statusCharUuid.replaceAll('-', '')) {
           _status = c;
-        }
-        if (id == controlCharUuid) {
+        } else if (id == controlCharUuid.replaceAll('-', '')) {
           _control = c;
+        } else if (id == sdDataCharUuid.replaceAll('-', '')) {
+          _sdData = c;
         }
       }
     }
@@ -314,15 +377,58 @@ class PendantBle {
       throw Exception('PCM characteristic not found');
     }
     await _listenStatus();
-    // Subscribe after connect so the initial "disconnected" event is ignored.
-    _connSub = d.connectionState.listen((state) {
-      if (state == BluetoothConnectionState.disconnected) {
-        _pcm = null;
-        if (!_intentionalDisconnect) {
-          onConnectionLost?.call();
-        }
+    // SD notify is optional — never block the link on it.
+    unawaited(_listenSdData());
+  }
+
+  Future<void> _listenSdData() async {
+    await _sdDataSub?.cancel();
+    _sdInbox.clear();
+    _sdWait = null;
+    final c = _sdData;
+    if (c == null) {
+      return;
+    }
+    _sdDataSub = c.onValueReceived.listen(_onSdData);
+    try {
+      await c.setNotifyValue(true);
+    } catch (_) {}
+  }
+
+  void _onSdData(List<int> data) {
+    final wait = _sdWait;
+    if (wait != null && !wait.isCompleted) {
+      wait.complete(List<int>.from(data));
+      _sdWait = null;
+      return;
+    }
+    _sdInbox.add(List<int>.from(data));
+  }
+
+  /// Arm waiter before the control write so a fast notify is not dropped.
+  Future<List<int>> _writeControlAwaitSd(
+    List<int> payload, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (_sdInbox.isNotEmpty) {
+      _sdInbox.clear();
+    }
+    final c = Completer<List<int>>();
+    _sdWait = c;
+    if (!await _writeControl(payload)) {
+      if (identical(_sdWait, c)) {
+        _sdWait = null;
       }
-    });
+      throw Exception('Could not write SD control');
+    }
+    try {
+      return await c.future.timeout(timeout);
+    } on TimeoutException {
+      if (identical(_sdWait, c)) {
+        _sdWait = null;
+      }
+      throw Exception('SD sync timed out waiting for pendant data');
+    }
   }
 
   Future<void> _listenStatus() async {
@@ -430,17 +536,25 @@ class PendantBle {
       await _status?.setNotifyValue(false);
     } catch (_) {}
     try {
+      await _sdData?.setNotifyValue(false);
+    } catch (_) {}
+    try {
       await device?.disconnect();
     } catch (_) {}
     await _notifySub?.cancel();
     _notifySub = null;
     await _statusSub?.cancel();
     _statusSub = null;
+    await _sdDataSub?.cancel();
+    _sdDataSub = null;
     await _connSub?.cancel();
     _connSub = null;
     _pcm = null;
     _status = null;
     _control = null;
+    _sdData = null;
+    _sdInbox.clear();
+    _sdWait = null;
     lastStatus = null;
   }
 
@@ -463,6 +577,118 @@ class PendantBle {
   /// Run the pendant SD card mount / write / read self-test.
   Future<bool> runSdTest() async {
     return _writeControl([2]);
+  }
+
+  /// List pending offline clips on the microSD (control 0x10 until END).
+  Future<List<SdPendingClip>> listPendingSd() async {
+    if (_sdData == null || _control == null) {
+      throw Exception('SD sync characteristic missing — update firmware');
+    }
+    if (_sdSyncBusy) {
+      throw Exception('SD sync already running');
+    }
+    _sdSyncBusy = true;
+    _sdInbox.clear();
+    try {
+      await _listenSdData();
+      final out = <SdPendingClip>[];
+      for (var i = 0; i < 64; i++) {
+        final pkt = await _writeControlAwaitSd([sdCtrlList]);
+        if (pkt.isEmpty) {
+          continue;
+        }
+        if (pkt[0] == sdMsgEnd) {
+          break;
+        }
+        if (pkt[0] != sdMsgList || pkt.length < 16) {
+          throw Exception('Unexpected SD list packet');
+        }
+        final kind = pkt[1];
+        final id = pkt.sublist(2, 10);
+        final size = pkt[10] |
+            (pkt[11] << 8) |
+            (pkt[12] << 16) |
+            (pkt[13] << 24);
+        final seq = pkt[14] | (pkt[15] << 8);
+        var session = '';
+        if (pkt.length > 16) {
+          final end = pkt.length < 48 ? pkt.length : 48;
+          final raw = pkt.sublist(16, end);
+          final nul = raw.indexOf(0);
+          session = String.fromCharCodes(nul < 0 ? raw : raw.sublist(0, nul));
+        }
+        out.add(
+          SdPendingClip(
+            id: id,
+            kind: kind,
+            size: size,
+            seq: seq,
+            session: session,
+          ),
+        );
+      }
+      return out;
+    } finally {
+      _sdSyncBusy = false;
+    }
+  }
+
+  /// Pull one clip's raw PCM after [listPendingSd] / open.
+  Future<List<int>> pullSdClip(List<int> id, {required int size}) async {
+    if (id.length != 8) {
+      throw Exception('SD clip id must be 8 bytes');
+    }
+    if (_sdData == null || _control == null) {
+      throw Exception('SD sync characteristic missing — update firmware');
+    }
+    if (_sdSyncBusy) {
+      throw Exception('SD sync already running');
+    }
+    _sdSyncBusy = true;
+    _sdInbox.clear();
+    try {
+      await _listenSdData();
+      if (!await _writeControl([sdCtrlOpen, ...id])) {
+        throw Exception('Could not open SD clip');
+      }
+      final pcm = <int>[];
+      var offset = 0;
+      while (offset < size) {
+        final want = (size - offset).clamp(0, 220);
+        final payload = <int>[
+          sdCtrlRead,
+          offset & 0xff,
+          (offset >> 8) & 0xff,
+          (offset >> 16) & 0xff,
+          (offset >> 24) & 0xff,
+          want & 0xff,
+          (want >> 8) & 0xff,
+        ];
+        final pkt = await _writeControlAwaitSd(payload);
+        if (pkt.isEmpty || pkt[0] != sdMsgRead || pkt.length < 15) {
+          throw Exception('Unexpected SD read packet');
+        }
+        final got = pkt[13] | (pkt[14] << 8);
+        if (got == 0) {
+          break;
+        }
+        if (pkt.length < 15 + got) {
+          throw Exception('Truncated SD read packet');
+        }
+        pcm.addAll(pkt.sublist(15, 15 + got));
+        offset += got;
+      }
+      return pcm;
+    } finally {
+      _sdSyncBusy = false;
+    }
+  }
+
+  Future<bool> deleteSdClip(List<int> id) async {
+    if (id.length != 8) {
+      return false;
+    }
+    return _writeControl([sdCtrlDelete, ...id]);
   }
 
   Future<bool> _writeControl(List<int> payload) async {

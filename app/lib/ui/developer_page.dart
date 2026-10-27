@@ -21,6 +21,8 @@ class DeveloperLive extends ChangeNotifier {
   List<TranscriptSegment> segments = const [];
   final List<String> buttonLog = [];
   int _seenBtnSeq = 0;
+  bool sdSyncBusy = false;
+  String? lastSdSync;
 
   DateTime? _lastNotify;
 
@@ -35,6 +37,8 @@ class DeveloperLive extends ChangeNotifier {
     required int totalInTok,
     required int totalOutTok,
     required List<TranscriptSegment> segments,
+    bool sdSyncBusy = false,
+    String? lastSdSync,
     bool force = false,
   }) {
     this.connected = connected;
@@ -47,6 +51,8 @@ class DeveloperLive extends ChangeNotifier {
     this.totalInTok = totalInTok;
     this.totalOutTok = totalOutTok;
     this.segments = segments;
+    this.sdSyncBusy = sdSyncBusy;
+    this.lastSdSync = lastSdSync;
     if (dbg != null && dbg.buttonSeq != 0 && dbg.buttonSeq != _seenBtnSeq) {
       _seenBtnSeq = dbg.buttonSeq;
       buttonLog.insert(
@@ -75,11 +81,13 @@ class DeveloperPage extends StatelessWidget {
     required this.live,
     required this.rangeBar,
     this.onSdTest,
+    this.onSdSync,
   });
 
   final DeveloperLive live;
   final Widget rangeBar;
   final Future<bool> Function()? onSdTest;
+  final Future<String> Function()? onSdSync;
 
   String _batteryLine(PendantStatus s) {
     final mv = s.batteryMv;
@@ -182,31 +190,61 @@ class DeveloperPage extends StatelessWidget {
                     ? 'Result: connect the pendant first'
                     : 'Result: ${s.sdLabel}',
               ),
+              Text(
+                s == null
+                    ? 'Pending offline clips: —'
+                    : 'Pending offline clips: ${s.pendingSdCount}'
+                        '${s.offlineRecording ? ' · recording now' : ''}',
+              ),
+              if (live.lastSdSync != null) Text('Last sync: ${live.lastSdSync}'),
               const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton(
-                  onPressed: (!live.connected ||
-                          onSdTest == null ||
-                          sdBusy)
-                      ? null
-                      : () async {
-                          final ok = await onSdTest!();
-                          if (!context.mounted) {
-                            return;
-                          }
-                          if (!ok) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Could not send SD test (control char missing?)',
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: (!live.connected ||
+                            onSdTest == null ||
+                            sdBusy)
+                        ? null
+                        : () async {
+                            final ok = await onSdTest!();
+                            if (!context.mounted) {
+                              return;
+                            }
+                            if (!ok) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Could not send SD test (control char missing?)',
+                                  ),
                                 ),
-                              ),
-                            );
-                          }
-                        },
-                  child: Text(sdBusy ? 'Testing…' : 'Run SD test'),
-                ),
+                              );
+                            }
+                          },
+                    child: Text(sdBusy ? 'Testing…' : 'Run SD test'),
+                  ),
+                  FilledButton.tonal(
+                    onPressed: (!live.connected ||
+                            onSdSync == null ||
+                            live.sdSyncBusy ||
+                            live.armed)
+                        ? null
+                        : () async {
+                            await onSdSync!();
+                          },
+                    child: Text(
+                      live.sdSyncBusy ? 'Syncing…' : 'Sync SD',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'While connected: click starts/stops a live meeting; long-press is a live note. '
+                'While disconnected: click = offline SD meeting, long-press = SD note. '
+                'Reconnect or tap Sync SD to pull offline clips. '
+                'Clips store pendant_clip_id so a second sync does not double-import.',
               ),
               const SizedBox(height: 8),
               const Text(

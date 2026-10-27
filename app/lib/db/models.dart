@@ -192,6 +192,7 @@ class ClipRecord {
     this.altCostUsd = 0,
     this.altError = '',
     this.altSegments = const [],
+    this.pendantClipId,
   });
 
   final String id;
@@ -217,6 +218,8 @@ class ClipRecord {
   final double altCostUsd;
   final String altError;
   final List<TranscriptSegment> altSegments;
+  /// 8-byte pendant SD clip id as lowercase hex (dedup on reconnect).
+  final String? pendantClipId;
 
   bool get hasAltStt =>
       altFullText.trim().isNotEmpty ||
@@ -257,6 +260,7 @@ class ClipRecord {
     double? altCostUsd,
     String? altError,
     List<TranscriptSegment>? altSegments,
+    String? pendantClipId,
     bool clearAlt = false,
   }) {
     return ClipRecord(
@@ -283,6 +287,7 @@ class ClipRecord {
       altCostUsd: clearAlt ? 0 : (altCostUsd ?? this.altCostUsd),
       altError: clearAlt ? '' : (altError ?? this.altError),
       altSegments: clearAlt ? const [] : (altSegments ?? this.altSegments),
+      pendantClipId: pendantClipId ?? this.pendantClipId,
     );
   }
 }

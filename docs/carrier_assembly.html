@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenPendant — carrier order and assembly</title>
+  <style>
+    :root {
+      --bg: #0c0b0a;
+      --panel: #161412;
+      --ink: #f4eee6;
+      --muted: #a89f94;
+      --line: #2c2824;
+      --accent: #ff4d00;
+      --accent-2: #ffb08a;
+      --ok: #5fbf82;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); }
+    body { font: 16px/1.5 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 80px; }
+    header { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 28px; }
+    .kicker {
+      color: var(--accent);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+      margin: 0 0 10px;
+    }
+    h1 { font-size: 2.1rem; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.02em; }
+    h2 {
+      font-size: 1.35rem;
+      margin: 48px 0 14px;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
+    }
+    h3 { font-size: 1.05rem; margin: 22px 0 8px; }
+    .lede { color: var(--muted); max-width: 46rem; }
+    .grid-2, .grid-3 { display: grid; gap: 16px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    @media (max-width: 820px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .card h3 { margin-top: 4px; }
+    figcaption, .cap {
+      font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+      margin: 10px 0 0;
+    }
+    .card img.photo, figure img.plot {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      display: block;
+      background: #100e0c;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+    }
+    th, td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      overflow-wrap: anywhere;
+    }
+    .warn {
+      background: #2a140c;
+      border: 1px solid #5a2a18;
+      color: var(--accent-2);
+      border-radius: 12px;
+      padding: 14px 16px;
+      font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
+    }
+    .ok {
+      background: #102218;
+      border: 1px solid #1e4a32;
+      color: var(--ok);
+      border-radius: 12px;
+      padding: 14px 16px;
+      font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
+    }
+    ol.steps { padding-left: 1.2rem; }
+    ol.steps li { margin: 0 0 14px; }
+    .pill {
+      display: inline-block;
+      font: 11px/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      border: 1px solid #5a2a18;
+      border-radius: 999px;
+      padding: 4px 8px;
+      margin-bottom: 8px;
+    }
+    nav { font: 13px/1.6 ui-sans-serif, system-ui, sans-serif; }
+    nav a { color: var(--accent-2); text-decoration: none; margin-right: 14px; }
+    nav a:hover { text-decoration: underline; }
+    a { color: var(--accent-2); }
+    footer {
+      margin-top: 56px;
+      color: var(--muted);
+      font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+    }
+    svg.diagram { width: 100%; height: auto; background: #100e0c; border-radius: 10px; }
+    .tag {
+      font: 11px/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    @media print {
+      :root { --bg: #fff; --panel: #fff; --ink: #111; --muted: #444; --line: #ddd; }
+      body { background: #fff; }
+      .card { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <p class="kicker">OpenPendant · carrier</p>
+      <h1>What arrives from JLCPCB, and what you solder</h1>
+      <p class="lede">
+        The carrier is a bare 23 × 38 mm board. JLCPCB fabricates the copper.
+        You mount the XIAO you already have, a microSD socket, one capacitor,
+        one button, and the cell wires. Read this before you upload anything.
+      </p>
+      <nav>
+        <a href="#box">In the box</a>
+        <a href="#you">Parts you add</a>
+        <a href="#order">Order settings</a>
+        <a href="#board">The bare board</a>
+        <a href="#steps">Soldering steps</a>
+        <a href="#xiao">How the XIAO sits</a>
+        <a href="carrier_preview.html">3D size view</a>
+        <a href="carrier_ears.html">Cord attachment options</a>
+      </nav>
+    </header>
+
+    <div class="warn">
+      <strong>Do not upload the old 30 × 45 mm gerber zip.</strong>
+      That is the other design, the expensive 4-layer board. Order
+      <span class="mono">hardware/openpendant_carrier/openpendant_carrier/output/openpendant_carrier-gerbers.zip</span>.
+      The KiCad project is
+      <span class="mono">hardware/openpendant_carrier/openpendant_carrier/openpendant_carrier.kicad_pro</span>.
+      Leave PCB assembly switched off. If assembly is on, you are paying
+      someone else to place parts, and this page is the wrong plan.
+    </div>
+
+    <h2 id="box">What JLCPCB puts in the package</h2>
+    <div class="grid-2">
+      <article class="card">
+        <span class="pill">In the JLCPCB box</span>
+        <h3>Empty boards, usually five</h3>
+        <p>
+          Five is the usual minimum. Each one is a green (or whatever mask
+          colour you pick) rectangle, 23 mm wide, 38 mm long, 1.6 mm thick.
+          The pads are already tinned with HASL. The white silk shows
+          <span class="mono">USB</span>, <span class="mono">C1</span>,
+          <span class="mono">SW1</span>, and on the back <span class="mono">BAT+</span>
+          and <span class="mono">BAT−</span>.
+        </p>
+        <p>
+          No XIAO, no socket, no capacitor, no button, no battery, no case.
+          Nothing is soldered. A stencil comes only if you add one to the order.
+        </p>
+      </article>
+      <article class="card">
+        <span class="pill">Not from JLCPCB</span>
+        <h3>The electronics, from you</h3>
+        <p>
+          The board is the wiring. The parts are separate. The XIAO is the
+          module you already run firmware on. The socket, capacitor, and
+          button are small parts you buy (LCSC is the easy source, and they
+          can ride along in the same checkout without being soldered).
+          The cell is a 1S LiPo, 3.7 V, about 6 × 20 × 30 mm (a 7 × 20 × 25 mm
+          cell fits the same pads). The case to print is the Orbit O in
+          <span class="mono">hardware/openpendant_carrier/cad/character/</span>.
+          Read <span class="mono">PRINT.txt</span> there. Do not print the older
+          shells under <span class="mono">cad/print/</span>.
+        </p>
+      </article>
+    </div>
+
+    <h2 id="you">Parts you have to have on the bench</h2>
+    <table>
+      <thead>
+        <tr><th>Part</th><th>What to buy</th><th>Where it goes</th><th>How hard</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>XIAO nRF52840 Sense</td>
+          <td>The module you already have. It must be the flat SMD version, with no pin headers.</td>
+          <td>Front, USB jack hanging off the short edge marked USB.</td>
+          <td>Edge pins are a normal iron fillet. One pad under the module needs paste or hot air.</td>
+        </tr>
+        <tr>
+          <td>microSD socket</td>
+          <td>Molex 104031-0811 (LCSC C585350). A connector, not a breakout board.</td>
+          <td>Front, mouth pointing off the end opposite the USB.</td>
+          <td>Contacts are 1.1 mm apart. Flux, a fine tip, and solder wick.</td>
+        </tr>
+        <tr>
+          <td>22 µF capacitor</td>
+          <td>0805 ceramic, 6.3 V or 10 V, X5R or X7R. No stripe, no polarity.</td>
+          <td>Front, in the gap between the XIAO and the socket. Silk says C1.</td>
+          <td>The easy one.</td>
+        </tr>
+        <tr>
+          <td>Button</td>
+          <td>A TS-1088 tactile switch, about 4 × 3 mm, pads 4.45 mm apart. Example: LCSC C720477.</td>
+          <td>Front, on the right, silk SW1. The Ø6 button from the strip does not fit.</td>
+          <td>Two pads. Easy.</td>
+        </tr>
+        <tr>
+          <td>Cell</td>
+          <td>Your WLY602030. Red is positive, black is negative. Open wires, no connector.</td>
+          <td>Two pads on the back, in the open bay at the USB end. The cell body starts above that bay, wire end facing the pads.</td>
+          <td>An iron. Cut the leads short, strip 2.5 mm, and follow the silk.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="cap">
+      Tools: a fine-tip iron, flux gel, 0.5 mm solder, tweezers, solder wick,
+      and a magnifier. For the one hidden battery pad, solder paste and a
+      hot-air gun, or a small hot plate. An iron alone cannot reach that pad
+      once the XIAO is sitting on it.
+    </p>
+
+    <h2 id="order">Settings to use when you do order</h2>
+    <div class="grid-2">
+      <article class="card">
+        <h3>Board</h3>
+        <table>
+          <tbody>
+            <tr><td>Layers</td><td>2</td></tr>
+            <tr><td>Size</td><td>23 × 38 mm, read from the gerber, do not type a different size</td></tr>
+            <tr><td>Thickness</td><td>1.6 mm</td></tr>
+            <tr><td>Finish</td><td>HASL</td></tr>
+            <tr><td>Copper</td><td>1 oz</td></tr>
+            <tr><td>Tracks</td><td>The board is drawn at 0.2 mm track and 0.2 mm gap, 0.3 mm via drill</td></tr>
+            <tr><td>Quantity</td><td>5</td></tr>
+            <tr><td>Assembly</td><td>Off</td></tr>
+          </tbody>
+        </table>
+      </article>
+      <article class="card">
+        <h3>Why assembly stays off</h3>
+        <p>
+          You already own a working XIAO. The factory would need a second,
+          bare one, plus a setup fee, and you would still want to check the
+          board yourself first. Five bare boards are the cheap experiment.
+          The hundred-dollar quote was the other board.
+        </p>
+        <p>
+          A stencil is optional. It only helps if you want to paste the whole
+          XIAO at once. A syringe of paste on the single hidden pad is enough.
+        </p>
+      </article>
+    </div>
+
+    <h2 id="board">The bare board, from the KiCad design</h2>
+    <p>
+      Both plots are drawn with the USB end at the top of the picture.
+      When you hold the pendant, that end is the bottom, the end that hangs
+      down. The card mouth is the other end.
+    </p>
+    <div class="grid-2">
+      <figure class="card">
+        <img class="plot" src="../hardware/openpendant_carrier/openpendant_carrier/output/front.png" alt="Front copper of the carrier. USB label is at the top of this plot." />
+        <figcaption>
+          Front copper. Large pads down both sides are the XIAO castellations.
+          C1 is the capacitor. SW1 is the button, on the right of this plot.
+          The row of small pads at the bottom of the picture is the SD socket,
+          which is the top of the pendant.
+        </figcaption>
+      </figure>
+      <figure class="card">
+        <img class="plot" src="../hardware/openpendant_carrier/openpendant_carrier/output/back.png" alt="Back copper of the carrier, with BAT+ and BAT- pads." />
+        <figcaption>
+          Back copper, looking at the back. The dark band is a gap in the
+          ground pour under the XIAO antenna. BAT+ and BAT− are at the USB
+          end, the top of this picture. Trust the silk on the real board.
+        </figcaption>
+      </figure>
+    </div>
+
+    <h3>Front, turned the way you will solder it</h3>
+    <p>USB at the bottom. You are looking at the component face.</p>
+    <figure class="card">
+      <svg class="diagram" viewBox="0 0 460 640" role="img" aria-label="Front of the carrier with USB at the bottom">
+        <rect x="70" y="40" width="230" height="380" rx="18" fill="#1c3d32" stroke="#d7c4a3" stroke-width="3"/>
+        <text x="185" y="28" text-anchor="middle" fill="#a89f94" font-size="13" font-family="ui-sans-serif, system-ui">top · card goes in this way</text>
+        <!-- SD socket -->
+        <rect x="90" y="55" width="150" height="120" rx="4" fill="#2a2a2a" stroke="#f4eee6" stroke-width="1.5"/>
+        <rect x="108" y="48" width="114" height="18" rx="2" fill="#4a4a4a" stroke="#f4eee6"/>
+        <text x="165" y="120" text-anchor="middle" fill="#f4eee6" font-size="14" font-family="ui-sans-serif, system-ui">SD socket</text>
+        <text x="165" y="140" text-anchor="middle" fill="#a89f94" font-size="11" font-family="ui-sans-serif, system-ui">mouth off the top edge</text>
+        <!-- button -->
+        <rect x="250" y="90" width="36" height="28" rx="3" fill="#c4c4c4" stroke="#f4eee6"/>
+        <circle cx="268" cy="104" r="8" fill="#eee"/>
+        <text x="268" y="136" text-anchor="middle" fill="#ffb08a" font-size="11" font-family="ui-sans-serif, system-ui">SW1</text>
+        <!-- cap -->
+        <rect x="150" y="190" width="28" height="16" rx="2" fill="#e6c36a" stroke="#f4eee6"/>
+        <text x="164" y="222" text-anchor="middle" fill="#ffb08a" font-size="11" font-family="ui-sans-serif, system-ui">C1 · 22 µF</text>
+        <text x="164" y="236" text-anchor="middle" fill="#a89f94" font-size="10" font-family="ui-sans-serif, system-ui">either way around</text>
+        <!-- XIAO -->
+        <rect x="96" y="250" width="178" height="150" rx="6" fill="#111" stroke="#f4eee6" stroke-width="1.5"/>
+        <text x="185" y="320" text-anchor="middle" fill="#f4eee6" font-size="16" font-family="ui-sans-serif, system-ui">XIAO</text>
+        <text x="185" y="340" text-anchor="middle" fill="#a89f94" font-size="11" font-family="ui-sans-serif, system-ui">component face up</text>
+        <!-- edge pads -->
+        <g fill="#c4554a">
+          <rect x="78" y="258" width="16" height="12" rx="1"/>
+          <rect x="78" y="276" width="16" height="12" rx="1"/>
+          <rect x="78" y="294" width="16" height="12" rx="1"/>
+          <rect x="78" y="312" width="16" height="12" rx="1"/>
+          <rect x="78" y="330" width="16" height="12" rx="1"/>
+          <rect x="78" y="348" width="16" height="12" rx="1"/>
+          <rect x="78" y="366" width="16" height="12" rx="1"/>
+          <rect x="276" y="258" width="16" height="12" rx="1"/>
+          <rect x="276" y="276" width="16" height="12" rx="1"/>
+          <rect x="276" y="294" width="16" height="12" rx="1"/>
+          <rect x="276" y="312" width="16" height="12" rx="1"/>
+          <rect x="276" y="330" width="16" height="12" rx="1"/>
+          <rect x="276" y="348" width="16" height="12" rx="1"/>
+          <rect x="276" y="366" width="16" height="12" rx="1"/>
+        </g>
+        <text x="48" y="276" text-anchor="end" fill="#a89f94" font-size="10" font-family="ui-monospace, monospace">D6</text>
+        <text x="48" y="376" text-anchor="end" fill="#a89f94" font-size="10" font-family="ui-monospace, monospace">D0</text>
+        <text x="308" y="276" fill="#a89f94" font-size="10" font-family="ui-monospace, monospace">D7</text>
+        <text x="308" y="376" fill="#a89f94" font-size="10" font-family="ui-monospace, monospace">5V</text>
+        <!-- USB plug -->
+        <rect x="145" y="400" width="80" height="28" rx="3" fill="#888" stroke="#f4eee6"/>
+        <text x="185" y="418" text-anchor="middle" fill="#111" font-size="11" font-family="ui-sans-serif, system-ui">USB-C</text>
+        <text x="185" y="450" text-anchor="middle" fill="#ffb08a" font-size="13" font-family="ui-sans-serif, system-ui">bottom · hangs down</text>
+        <text x="185" y="500" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">You do not run wires.</text>
+        <text x="185" y="518" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">The copper already joins D6 to the</text>
+        <text x="185" y="536" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">card’s CS, D7 to DAT0, D8 to CMD,</text>
+        <text x="185" y="554" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">D9 to CLK, and D1 to the button.</text>
+      </svg>
+      <figcaption>Placement on the front. Left edge, from the top down: D6 D5 D4 D3 D2 D1 D0. Right edge, from the top down: D7 D8 D9 D10 3V3 GND 5V. Leave 5V empty of any wire. Solder the pad anyway so the module is held flat.</figcaption>
+    </figure>
+
+    <h2 id="xiao">How the XIAO actually connects</h2>
+    <p>
+      There is no connector and no header. The XIAO sits flat on the front
+      pads and you solder its castellations, the little half-holes along
+      both long edges. Those fillets are the electrical connection for the
+      SD card, the button, 3.3 V, and ground.
+    </p>
+    <div class="grid-2">
+      <figure class="card">
+        <svg class="diagram" viewBox="0 0 520 220" role="img" aria-label="Side view of the XIAO soldered on castellations">
+          <text x="20" y="28" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">Side view · USB toward you</text>
+          <rect x="40" y="120" width="440" height="18" fill="#1c3d32" stroke="#d7c4a3"/>
+          <text x="260" y="168" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">carrier, 1.6 mm</text>
+          <rect x="90" y="70" width="300" height="36" fill="#222" stroke="#f4eee6"/>
+          <text x="240" y="92" text-anchor="middle" fill="#f4eee6" font-size="13" font-family="ui-sans-serif, system-ui">XIAO</text>
+          <rect x="70" y="100" width="28" height="22" fill="#c4554a"/>
+          <rect x="382" y="100" width="28" height="22" fill="#c4554a"/>
+          <text x="84" y="196" text-anchor="middle" fill="#ffb08a" font-size="11" font-family="ui-sans-serif, system-ui">left fillet</text>
+          <text x="396" y="196" text-anchor="middle" fill="#ffb08a" font-size="11" font-family="ui-sans-serif, system-ui">right fillet</text>
+          <rect x="160" y="106" width="36" height="14" fill="#e6c36a"/>
+          <text x="178" y="58" text-anchor="middle" fill="#e6c36a" font-size="12" font-family="ui-sans-serif, system-ui">BAT+ under here</text>
+          <line x1="178" y1="64" x2="178" y2="104" stroke="#e6c36a" stroke-width="1"/>
+        </svg>
+        <figcaption>
+          The red pads stick out past the module. Touch the iron there.
+          The yellow pad is battery positive. It is under the body, so you
+          tin it before the module goes down.
+        </figcaption>
+      </figure>
+      <figure class="card">
+        <img class="photo" src="cad/xiao_bottom_silkscreen.png" alt="Bottom of a XIAO nRF52840, showing the BAT pads in the middle." />
+        <figcaption>
+          Bottom of the XIAO, from Seeed’s drawing. The pad marked + is
+          battery positive. That is the one hidden joint. The pad next to
+          it is ground, and an edge ground pin already does that job, so
+          you can leave the underside ground pad unsoldered.
+        </figcaption>
+      </figure>
+    </div>
+    <div class="ok">
+      If the XIAO on your strip has pin headers, they have to come off before
+      it will sit on this board. The carrier has no holes for those pins.
+      Desolder them, or keep that XIAO on the strip and put a header-free
+      Sense module on the carrier.
+    </div>
+
+    <h2 id="steps">Assembly, in order</h2>
+    <ol class="steps">
+      <li>
+        <strong>Look at a bare board before any solder.</strong>
+        One short edge is marked USB. The SD pads are at the other short edge.
+        Flip it. Two pads near the USB end are marked BAT+ and BAT−.
+        If the silk is missing or the outline is not 23 × 38 mm, stop.
+      </li>
+      <li>
+        <strong>Tin battery positive before the XIAO goes down.</strong>
+        On the front, the BAT+ pad is the small rectangle that will sit under
+        the left half of the module, not the big back-side wire pad.
+        Put a small dome of solder or a dot of paste on that pad, and tin the
+        matching + pad on the bottom of the XIAO. Too much solder tilts the module.
+      </li>
+      <li>
+        <strong>Place the XIAO and tack two corners.</strong>
+        Component face up, antenna and mic away from the USB. The USB-C jack
+        hangs off the USB edge of the board. The castellations should sit
+        centered on the red pads, the same amount sticking out on the left
+        and the right. Tack one corner, check, then tack the opposite corner.
+      </li>
+      <li>
+        <strong>Melt the hidden BAT+ joint.</strong>
+        Hot air on that area, or a hot plate under the board, while you press
+        the module flat with tweezers. You will not see the joint. When it
+        has cooled, the module should not rock. Later, a meter from the back
+        BAT+ pad to the XIAO’s BAT+ pad should beep. If it does not, the cell
+        will not charge and will not power the board.
+      </li>
+      <li>
+        <strong>Solder the fourteen edge pads with the iron.</strong>
+        Flux first, then a small fillet on each castellation. Drag solder is
+        fine if you wick any bridge. D4 and D5 are the motion sensor and must
+        stay unconnected to anything except their own pad. 5V stays a pad
+        with no wire. Solder it only to hold the module.
+      </li>
+      <li>
+        <strong>Capacitor, then button.</strong>
+        C1 is the 0805 between the XIAO and the socket. Either orientation.
+        SW1 is the button on the right. Two pads, no polarity, button facing up.
+        The round 6 mm button from the perfboard strip does not fit these pads.
+      </li>
+      <li>
+        <strong>Socket last, so the iron has room.</strong>
+        Metal shell on the front. The mouth and the card guide point off the
+        top edge, away from the USB. Tack the big shield tabs first so it
+        cannot shift, then the contact row. 1.1 mm pitch. If two contacts
+        bridge, flux and wick. Do not scrape the contacts with the iron.
+      </li>
+      <li>
+        <strong>Cell wires on the back, in the open bay.</strong>
+        Back of the board facing you, USB end toward you. The left pad is
+        BAT+ and the right pad is BAT−, and the silk says so. Turn the cell
+        so the wires come out of the end nearest those pads. Cut each lead
+        to about 10 mm, strip 2.5 mm, and lay the bare end flat on the pad.
+        The insulation sits in the gap between the pad and the cell. It
+        does not tuck under the cell: there is no room there. Red on the
+        left, black on the right. Those pads are already connected to the
+        XIAO. Do not also touch the cell to the 5V pad, and do not add a
+        separate charger. The charger is the one already on the XIAO.
+      </li>
+    </ol>
+
+    <h3>Back, the way the wires go on</h3>
+    <figure class="card">
+      <svg class="diagram" viewBox="0 0 460 520" role="img" aria-label="Back of the carrier with the cell above a wire bay">
+        <rect x="90" y="30" width="230" height="380" rx="18" fill="#163428" stroke="#d7c4a3" stroke-width="3"/>
+        <text x="205" y="20" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">top of the pendant · card end</text>
+        <rect x="108" y="48" width="194" height="230" rx="4" fill="#243a86" stroke="#9eb0e0"/>
+        <text x="205" y="150" text-anchor="middle" fill="#d5def8" font-size="14" font-family="ui-sans-serif, system-ui">cell, on the back</text>
+        <text x="205" y="170" text-anchor="middle" fill="#9eb0e0" font-size="11" font-family="ui-sans-serif, system-ui">wire end faces the USB</text>
+        <rect x="108" y="278" width="194" height="70" rx="4" fill="#2a140c" stroke="#ffb08a"/>
+        <text x="205" y="318" text-anchor="middle" fill="#ffb08a" font-size="12" font-family="ui-sans-serif, system-ui">open bay for the leads</text>
+        <rect x="128" y="300" width="28" height="40" rx="2" fill="#c4554a"/>
+        <rect x="254" y="300" width="28" height="40" rx="2" fill="#c4554a"/>
+        <text x="142" y="292" text-anchor="middle" fill="#ffb08a" font-size="12" font-family="ui-sans-serif, system-ui">BAT+</text>
+        <text x="268" y="292" text-anchor="middle" fill="#ffb08a" font-size="12" font-family="ui-sans-serif, system-ui">BAT−</text>
+        <path d="M142 278 C142 292, 142 296, 142 300" stroke="#c4554a" stroke-width="3" fill="none"/>
+        <path d="M268 278 C268 292, 268 296, 268 300" stroke="#111" stroke-width="3" fill="none"/>
+        <text x="142" y="356" text-anchor="middle" fill="#f4eee6" font-size="12" font-family="ui-sans-serif, system-ui">red</text>
+        <text x="268" y="356" text-anchor="middle" fill="#f4eee6" font-size="12" font-family="ui-sans-serif, system-ui">black</text>
+        <text x="205" y="440" text-anchor="middle" fill="#ffb08a" font-size="13" font-family="ui-sans-serif, system-ui">USB end · this view is the back</text>
+        <text x="205" y="462" text-anchor="middle" fill="#a89f94" font-size="12" font-family="ui-sans-serif, system-ui">leads stay in the bay, not under the cell</text>
+      </svg>
+      <figcaption>
+        Looking at the back, USB end down. The cell sits above the pads.
+        Each lead is cut to about 10 mm so it reaches its pad and still has
+        a small curve in the bay. Read the silk on the board you receive.
+        If the silk and this drawing disagree, follow the silk.
+      </figcaption>
+    </figure>
+
+    <h2>Check it before you print the case</h2>
+    <ol class="steps">
+      <li>No cell yet. Plug USB. The XIAO should show up on the computer the same way it does today. The charge LED is the small light by the USB jack.</li>
+      <li>Meter: back BAT+ to the XIAO BAT+ pad beeps. Back BAT− beeps to a GND castellation. BAT+ does not beep to GND.</li>
+      <li>Push a microSD in from the top until it seats. The firmware already talks SPI on D6, D7, D8, and D9. The card should mount. Pull to remove. This socket does not click-to-eject.</li>
+      <li>Then the cell. Red and black as marked. USB should still charge it. Unplug USB and the board should stay on from the cell.</li>
+      <li>The button is D1, active low. A press should do what the button does on the strip.</li>
+    </ol>
+    <p>
+      The printed shells are a separate job, after this works. Print
+      <span class="mono">character_front.3mf</span>,
+      <span class="mono">character_back.stl</span>, and
+      <span class="mono">character_button_hat.stl</span> from
+      <span class="mono">hardware/openpendant_carrier/cad/character/</span>.
+      The print settings, snap, USB opening, and chain bail are in
+      <span class="mono">PRINT.txt</span> in that folder. JLCPCB does not make
+      the case. Do not print <span class="mono">cad/print/</span>.
+    </p>
+
+    <h2>The decision, plainly</h2>
+    <div class="grid-3">
+      <article class="card">
+        <h3>Easy with an iron</h3>
+        <p>The capacitor, the button, the two cell wires in the back bay, and the XIAO’s edge fillets, if you have flux and a fine tip.</p>
+      </article>
+      <article class="card">
+        <h3>Needs care</h3>
+        <p>The SD socket’s 1.1 mm contacts. Bridges are normal the first time. Wick fixes them. Nothing on this board is a chip you can cook by holding the iron in one place.</p>
+      </article>
+      <article class="card">
+        <h3>The one new skill</h3>
+        <p>Battery positive is a pad you tin, then melt, under the XIAO. If you do not want hot air or a hot plate, do not order yet. Everything else can wait with it.</p>
+      </article>
+    </div>
+
+    <footer>
+      Carrier design in KiCad, project <span class="mono">openpendant_carrier</span>.
+      Plots are <span class="mono">output/front.png</span> and <span class="mono">output/back.png</span>.
+      The XIAO bottom picture is Seeed’s silkscreen drawing in <span class="mono">docs/cad/</span>.
+    </footer>
+  </div>
+</body>
+</html>

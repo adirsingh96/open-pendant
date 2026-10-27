@@ -1,12 +1,69 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:openpendant/db/models.dart';
 import 'package:openpendant/stt/saaras_stt.dart';
 import 'package:openpendant/stt/stt_pricing.dart';
 import 'package:openpendant/stt/voice_store.dart';
 
+class _StatusClient extends http.BaseClient {
+  _StatusClient(this.codes);
+
+  final List<int> codes;
+  int calls = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    await request.finalize().drain<void>();
+    final code = codes[calls.clamp(0, codes.length - 1)];
+    calls++;
+    final body = code >= 400
+        ? '{"error":{"message":"busy"}}'
+        : '{"transcript":"hello there"}';
+    return http.StreamedResponse(
+      Stream.value(utf8.encode(body)),
+      code,
+    );
+  }
+}
+
 void main() {
+  test('retries Sarvam 503 then keeps the transcript', () async {
+    final dir = await Directory.systemTemp.createTemp('saaras');
+    addTearDown(() => dir.delete(recursive: true));
+    final wav = File('${dir.path}/clip.wav');
+    await wav.writeAsBytes(const [0, 1, 2, 3]);
+    final client = _StatusClient([503, 503, 200]);
+    final stt = SaarasStt(client: client, retryPause: Duration.zero);
+    final r = await stt.transcribe(
+      wav: wav,
+      apiKey: 'test',
+      startedAt: DateTime.utc(2026, 10, 26),
+    );
+    expect(r.text, 'hello there');
+    expect(client.calls, 3);
+  });
+
+  test('does not retry a Sarvam 400', () async {
+    final dir = await Directory.systemTemp.createTemp('saaras400');
+    addTearDown(() => dir.delete(recursive: true));
+    final wav = File('${dir.path}/clip.wav');
+    await wav.writeAsBytes(const [0, 1, 2, 3]);
+    final client = _StatusClient([400]);
+    final stt = SaarasStt(client: client, retryPause: Duration.zero);
+    await expectLater(
+      stt.transcribe(
+        wav: wav,
+        apiKey: 'test',
+        startedAt: DateTime.utc(2026, 10, 26),
+      ),
+      throwsA(predicate((Object e) => e.toString().contains('REST 400'))),
+    );
+    expect(client.calls, 1);
+  });
+
   test('recognizes and shortens Saaras missing-key errors', () {
     final error = Exception(
       'saaras:v4 REST 403: No keys added. Please add your server key.',
@@ -23,10 +80,10 @@ void main() {
     expect(friendlySaarasError(error), contains('too long'));
   });
 
-  test('saarasRestPcmRanges splits long PCM under 28s', () {
+  test('saarasRestPcmRanges splits long PCM under 12s', () {
     final sixty = 60 * 16000 * 2;
     final ranges = saarasRestPcmRanges(sixty);
-    expect(ranges, hasLength(3));
+    expect(ranges, hasLength(5));
     expect(ranges.first.$1, 0);
     expect(ranges.last.$2, sixty);
     for (final (start, end) in ranges) {
@@ -78,7 +135,7 @@ void main() {
     expect(merged.segments, hasLength(2));
   });
 
-  test('parseSaarasTranscript uses diarized entries', () {
+  test('parseSaarasTranscript ignores diarized entries', () {
     final r = parseSaarasTranscript(
       json: {
         'transcript': 'Hello. Question.',
@@ -99,15 +156,14 @@ void main() {
           ],
         },
       },
-      model: 'saaras:v4+diarize',
+      model: 'saaras:v4',
       startedAt: DateTime.utc(2026, 8, 21, 10),
       billedSeconds: 5,
     );
-    expect(r.segments, hasLength(2));
-    expect(r.segments[0].speaker, 'Speaker 1');
-    expect(r.segments[1].speaker, 'Speaker 2');
-    expect(r.segments[1].text, 'Question.');
-    expect(r.text, contains('Speaker 1:'));
+    expect(r.segments, hasLength(1));
+    expect(r.segments.single.speaker, isNull);
+    expect(r.segments.single.text, 'Hello. Question.');
+    expect(r.text, 'Hello. Question.');
   });
 
   test('parseSaarasTranscript prefers transcript over word timestamps', () {
@@ -197,8 +253,9 @@ void main() {
       VoiceProfile(id: '1', name: 'Aditya', wavPath: '/tmp/a.wav'),
       VoiceProfile(id: '2', name: 'Sushma', wavPath: '/tmp/b.wav'),
     ]);
-    expect(named.segments[0].speaker, 'Aditya');
-    expect(named.segments[1].speaker, 'Sushma');
+    expect(named.segments, hasLength(1));
+    expect(named.segments.single.speaker, 'Aditya');
+    expect(named.segments.single.text, 'A B');
   });
 
   test('saarasSpeakerLabel maps SPEAKER_00', () {
