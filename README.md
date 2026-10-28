@@ -25,7 +25,7 @@ The table above is the first bench build on perfboard. The wearable replaces tha
 | [`docs/carrier_assembly.html`](docs/carrier_assembly.html) | What arrives, what you solder, and the pin map |
 | [`cad/character/`](hardware/openpendant_carrier/cad/character/) | Case to print: `character_front.3mf`, `character_back.stl`, `character_button_hat.stl`. Read `PRINT.txt` in that folder. |
 
-Print the character case (Orbit O). PETG, 0.4 mm nozzle, 0.2 mm layers, no supports. Front skirt on the bed. Back chest-down so the chain bail sits on the bed. Do not print anything from `cad/print/`; those shells are an older shape.
+Print the character case (Orbit O). PETG, 0.4 mm nozzle, 0.2 mm layers, no supports. Front skirt on the bed. Back chest-down so the chain bail sits on the bed. That folder is the only case in the repo.
 
 Assembly guide for the first perfboard build: [`docs/pendant_assembly.html`](docs/pendant_assembly.html).
 

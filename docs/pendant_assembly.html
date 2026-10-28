@@ -576,56 +576,42 @@
     <div class="grid-2">
       <div class="card">
         <h3>Print files</h3>
+        <p>
+          This page is the first strip build. The case to print is the Orbit O
+          carrier shell, not a model from this folder.
+        </p>
         <table>
           <thead><tr><th>File</th><th>What</th></tr></thead>
           <tbody>
-            <tr><td><a href="cad/pendant_case_print.stl"><span class="mono">pendant_case_print.stl</span></a></td><td>Both halves on one plate</td></tr>
-            <tr><td><a href="cad/pendant_case_back.stl"><span class="mono">pendant_case_back.stl</span></a></td><td>Chest shell + cord bail</td></tr>
-            <tr><td><a href="cad/pendant_case_front.stl"><span class="mono">pendant_case_front.stl</span></a></td><td>World lid: mic, LED, button holes</td></tr>
-            <tr><td><a href="cad/pendant_case.scad"><span class="mono">pendant_case.scad</span></a></td><td>Parametric source if you resize</td></tr>
-            <tr><td><span class="mono">generate_case.py</span></td><td>Rebuilds the STLs (Python 3, no extras)</td></tr>
+            <tr><td><span class="mono">character_front.3mf</span></td><td>Lid, black shell with the white orbit inlay</td></tr>
+            <tr><td><span class="mono">character_back.stl</span></td><td>Chest shell and chain bail</td></tr>
+            <tr><td><span class="mono">character_button_hat.stl</span></td><td>Button cap</td></tr>
           </tbody>
         </table>
-        <p class="cap">Slicer: drop in the print plate STL. Units are millimetres.</p>
+        <p class="cap">All three are in <span class="mono">hardware/openpendant_carrier/cad/character/</span>. Print settings are in <span class="mono">PRINT.txt</span> there.</p>
       </div>
       <div class="card">
-        <h3>Case dimensions</h3>
-        <table>
-          <thead><tr><th></th><th>mm</th></tr></thead>
-          <tbody>
-            <tr><td>Inner cavity</td><td>23 × 48 × 15</td></tr>
-            <tr><td>Outer, closed, with bail</td><td>26 × 59 × 18</td></tr>
-            <tr><td>Wall</td><td>1.6</td></tr>
-            <tr><td>USB-C window</td><td>12.0 × 5.4</td></tr>
-            <tr><td>Mic hole</td><td>Ø 3.0</td></tr>
-            <tr><td>LED hole</td><td>Ø 2.4</td></tr>
-            <tr><td>Button hole</td><td>Ø 6.6 (plunger through, body stays inside)</td></tr>
-            <tr><td>Nail grooves</td><td>14 × 3.4 × 1.2</td></tr>
-          </tbody>
-        </table>
+        <h3>Case</h3>
+        <p>
+          Outer size, snap, USB opening, and chain bail are in
+          <span class="mono">PRINT.txt</span> next to the STLs. The pictures on
+          this page are the early strip shell.
+        </p>
       </div>
     </div>
 
     <h3>Print settings</h3>
     <div class="card">
-      <table>
-        <thead><tr><th>Setting</th><th>Value</th></tr></thead>
-        <tbody>
-          <tr><td>Material</td><td>PETG (snaps). PLA works for a first fit.</td></tr>
-          <tr><td>Layer / nozzle</td><td>0.20 mm / 0.40 mm</td></tr>
-          <tr><td>Walls / infill</td><td>3 walls, 15% gyroid</td></tr>
-          <tr><td>Orientation</td><td>Back: chest face on the bed, cavity up. Front: lip on the bed. Bail stands up.</td></tr>
-          <tr><td>Supports</td><td>Off. Barbs are 45°.</td></tr>
-          <tr><td>Brim</td><td>Yes, 5 mm, on the front lid lip</td></tr>
-        </tbody>
-      </table>
+      <p>
+        PETG, 0.4 mm nozzle, 0.2 mm layers, no supports. Front skirt on the bed.
+        Back chest-down so the chain bail sits on the bed. The rest is in
+        <span class="mono">hardware/openpendant_carrier/cad/character/PRINT.txt</span>.
+      </p>
     </div>
 
     <ol class="steps">
       <li>
-        <strong>Test fit the empty case.</strong> Snap together, then open from a side groove.
-        If it is too tight, sand the lip; if it falls open, reprint with <span class="mono">BARB = 1.0</span>
-        in <span class="mono">generate_case.py</span>.
+        <strong>Test fit the empty case.</strong> Snap the Orbit O shells together, then open from the notch in the middle of a long side.
       </li>
       <li>
         <strong>Seat the electronics.</strong> LiPo against the back floor (already taped to the strip).
@@ -643,8 +629,8 @@
     </div>
 
     <footer>
-      OpenPendant hardware note — 8×18 strip, SD on the front, LiPo on the back last. Slice
-      <span class="mono">docs/cad/pendant_case_print.stl</span>. Use the 3D view above to dry-fit.
+      OpenPendant hardware note — 8×18 strip, SD on the front, LiPo on the back last.
+      The case to print is <span class="mono">hardware/openpendant_carrier/cad/character/</span>.
     </footer>
   </div>
   <script src="vendor/three.min.js"></script>
