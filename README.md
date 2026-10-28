@@ -1,6 +1,6 @@
 # OpenPendant
 
-[![Launch film](docs/launch/poster.jpg)](docs/launch/openpendant.mp4)
+https://github.com/user-attachments/assets/51f84d97-9171-487b-b558-6a6707e0dcb2
 
 The launch film: it listens only when you ask, the meeting stays on your phone, you bring your own keys, and the board, case, and firmware are open source.
 
