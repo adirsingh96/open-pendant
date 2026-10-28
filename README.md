@@ -4,6 +4,10 @@ Open-source DIY AI audio pendant. Firmware runs on a **Seeed XIAO nRF52840 Sense
 
 Record only with an obvious LED and an explicit host subscribe (GATT notify on = recording).
 
+<video src="https://github.com/adirsingh96/open-pendant/raw/master/docs/launch/openpendant.mp4" width="960" controls poster="https://github.com/adirsingh96/open-pendant/raw/master/docs/img/case-render.png"></video>
+
+The launch film: it listens only when you ask, the meeting stays on your phone, you bring your own keys, and the board, case, and firmware are open source.
+
 ## Hardware
 
 | Part | Notes |
