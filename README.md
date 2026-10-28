@@ -27,6 +27,8 @@ The table above is the first bench build on perfboard. The wearable replaces tha
 
 Print the character case (Orbit O). PETG, 0.4 mm nozzle, 0.2 mm layers, no supports. Front skirt on the bed. Back chest-down so the chain bail sits on the bed. That folder is the only case in the repo.
 
+![Orbit O case, rendered from the print files](docs/img/case-render.png)
+
 Assembly guide for the first perfboard build: [`docs/pendant_assembly.html`](docs/pendant_assembly.html).
 
 ### Wiring (USB at the bottom)
@@ -117,6 +119,12 @@ BLE advertises as **OpenPendant**. Disconnect nRF Connect before the app or lapt
 4. Second sync imports nothing (deleted on card / `pendant_clip_id` dedup).
 5. Regression: with BLE connected and Record armed, audio streams over PCM notify with **no** new SD writes.
 ## Flutter app
+
+A meeting stays one transcript. Overview is the short recap, action items, and private notes. Ask about this meeting sits under either tab.
+
+| Transcript | Overview |
+|------------|----------|
+| ![Meeting transcript](docs/img/app-transcript.png) | ![Meeting overview, with the recap and action items](docs/img/app-overview.png) |
 
 ```bash
 cd app
