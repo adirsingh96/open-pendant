@@ -1,12 +1,12 @@
 # OpenPendant
 
+[![Launch film](docs/launch/poster.jpg)](docs/launch/openpendant.mp4)
+
+The launch film: it listens only when you ask, the meeting stays on your phone, you bring your own keys, and the board, case, and firmware are open source.
+
 Open-source DIY AI audio pendant. Firmware runs on a **Seeed XIAO nRF52840 Sense**. The necklace captures audio and streams 16 kHz PCM over BLE. Speech-to-text runs on the **phone or laptop**. The MCU never holds an API key.
 
 Record only with an obvious LED and an explicit host subscribe (GATT notify on = recording).
-
-<video src="https://github.com/adirsingh96/open-pendant/raw/master/docs/launch/openpendant.mp4" width="960" controls poster="https://github.com/adirsingh96/open-pendant/raw/master/docs/img/case-render.png"></video>
-
-The launch film: it listens only when you ask, the meeting stays on your phone, you bring your own keys, and the board, case, and firmware are open source.
 
 ## Hardware
 
